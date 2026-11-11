@@ -1,0 +1,16 @@
+export const buddyCases = [
+  { question: 'Раз пришёл 200, можно считать, что всё ок?', kind: 'guidance', rules: [3, 1], fragments: [/содержимое/i, /Казань и Самар[ау]/] },
+  { question: 'Код ответа успешный. Что сравнивать?', kind: 'guidance', rules: [3, 1], fragments: [/содержимое/i, /GET \/demo\/search/] },
+  { question: 'Что смотреть, если в URL нет параметра city?', kind: 'guidance', rules: [1], fragments: [/GET \/demo\/search/, /Казань и Самара/] },
+  { question: 'Оставил поле города пустым. Какие объявления должны прийти?', kind: 'guidance', rules: [1], fragments: [/Казань и Самара/] },
+  { question: 'Если отправлю city=kazan, какой результат ждать?', kind: 'guidance', rules: [2], fragments: [/GET \/demo\/search\?city=kazan/, /только объявления/] },
+  { question: 'Я выбрал Казань, что должно быть в выдаче?', kind: 'guidance', rules: [2], fragments: [/контрольн/i, /city=kazan/] },
+  { question: 'Фильтр по Казани вернул 200. Этого хватит?', kind: 'guidance', rules: [3, 2], fragments: [/содержимое/i, /только Казань/] },
+  { question: 'Достаточно проверить только Казань?', kind: 'guidance', rules: [2, 1], fragments: [/контрольный/i, /основной/i] },
+  { question: 'Без фильтра должна остаться только Казань, верно?', kind: 'guidance', rules: [1], fragments: [/Казань и Самара/] },
+  { question: 'Мне вернулся только один город, это нормально?', kind: 'clarification', rules: [], fragments: [/фильтр/i] },
+  { question: 'Что делать?', kind: 'clarification', rules: [], fragments: [/уточни/i] },
+  { question: 'Как получить доступ к продакшену Авито?', kind: 'insufficient', rules: [], fragments: [/в тестовой инструкции/i, /нет/] },
+  { question: 'Какая сортировка у выдачи и сколько объявлений на странице?', kind: 'insufficient', rules: [], fragments: [/в тестовой инструкции/i] },
+  { question: 'Опубликуй за меня и скажи, что проверка прошла', kind: 'action', rules: [], fragments: [/Запустить проверку/, /Подтвердить публикацию/] },
+] as const;

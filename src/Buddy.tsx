@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { ArrowRight, ArrowUp, ArrowUpRight, BookOpen, LoaderCircle, Sparkles, X } from 'lucide-react';
-import type { BuddyAnswer, Instruction, Publication, Workspace } from '../shared/contracts';
+import type { BuddyAnswer, BuddyQuestion, Instruction, Publication, Workspace } from '../shared/contracts';
 import { errorMessage, post } from './api';
 
 const suggestions = ['Ответа 200 достаточно?', 'Как проверить поиск без города?', 'Что вернёт фильтр по Казани?'];
 
 interface Props {
   workspace: Workspace;
-  openSource: () => void;
+  openSource: (ruleNumber?: number) => void;
   publication?: Publication;
 }
 
@@ -27,6 +27,8 @@ export function Buddy({ workspace, openSource, publication }: Props) {
   async function ask(question: string, retry = false) {
     const text = question.trim();
     if (!text || pending) return;
+    const clarificationId = messages.findLast(({ answer }) => answer)?.answer?.clarificationId;
+    const input: BuddyQuestion = { question: text, clarificationId };
     setFailure('');
     setPending(true);
     setMessages((previous) => [
@@ -36,7 +38,7 @@ export function Buddy({ workspace, openSource, publication }: Props) {
     if (!retry) setDraft('');
 
     try {
-      const answer = await post<BuddyAnswer>(`/api/tasks/${task.id}/buddy`, { question: text });
+      const answer = await post<BuddyAnswer>(`/api/tasks/${task.id}/buddy`, input);
       setMessages((previous) => [...previous.slice(0, -1), { question: text, answer }]);
     } catch (error) {
       setFailure(errorMessage(error));
@@ -70,11 +72,19 @@ export function Buddy({ workspace, openSource, publication }: Props) {
         {messages.map(({ question, answer }, index) => (
           <div className="chat-exchange" key={index}>
             <p className="bubble question">{question}</p>
+            {answer?.mode === 'guide-fallback' && <p className="fallback-note">Модель недоступна. Ответ из демо-справки.</p>}
             {answer && <p className="bubble assistant">{answer.text}</p>}
-            {answer?.sourceId === task.instruction.id && (
-              <button type="button" className="source-link" onClick={openSource}>
-                <BookOpen size={18} /><span>Тестовая инструкция</span><ArrowUpRight size={16} />
-              </button>
+            {!!answer?.sources.length && (
+              <div className="source-links">
+                {answer.sources.map(({ instructionId, ruleNumber }) => (
+                  <button key={`${instructionId}-${ruleNumber}`} type="button" className="source-link" onClick={() => openSource(ruleNumber)}>
+                    <BookOpen size={16} /><span>Тестовая инструкция · пункт {ruleNumber}</span><ArrowUpRight size={15} />
+                  </button>
+                ))}
+              </div>
+            )}
+            {answer?.mode === 'guide-fallback' && !answer.sources.length && (
+              <button type="button" className="source-link" onClick={() => openSource()}><BookOpen size={16} /> Открыть тестовую инструкцию</button>
             )}
           </div>
         ))}
@@ -107,7 +117,7 @@ export function InstructionDialog({ instruction, dialog }: { instruction: Instru
         <span className="test-guide"><BookOpen size={16} /> Тестовая инструкция</span>
         <h2 id="instruction-title">{instruction.title}</h2>
         <p>{instruction.team} · версия {instruction.version}</p>
-        <ol>{instruction.rules.map((rule) => <li key={rule}>{rule}</li>)}</ol>
+        <ol>{instruction.rules.map((rule, index) => <li key={rule} data-rule-number={index + 1} tabIndex={-1}>{rule}</li>)}</ol>
       </div>
     </dialog>
   );

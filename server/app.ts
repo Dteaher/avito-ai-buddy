@@ -2,8 +2,8 @@ import { randomBytes } from 'node:crypto';
 import { resolve } from 'node:path';
 import express, { type ErrorRequestHandler, type Request, type RequestHandler } from 'express';
 import type { Workspace } from '../shared/contracts.ts';
-import type { createBuddy } from './buddy.ts';
-import { checks, executeRun, isObject, listings, parseChecks, task, trainee } from './scenario.ts';
+import { parseBuddyQuestion, type createBuddy } from './buddy.ts';
+import { checks, executeRun, listings, parseChecks, task, trainee } from './scenario.ts';
 import type { createStore } from './store.ts';
 
 interface AppOptions {
@@ -71,16 +71,12 @@ export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) 
   };
 
   app.post('/api/tasks/:taskId/buddy', assignedTask, async (req, res) => {
-    const question = isObject(req.body) && typeof req.body.question === 'string' ? req.body.question.trim() : '';
-    if (!question || question.length > 500) {
-      res.status(400).json({ message: 'Введи вопрос длиной до 500 символов.' });
+    const input = parseBuddyQuestion(req.body);
+    if (!input) {
+      res.status(400).json({ message: 'Проверь вопрос и попробуй ещё раз. Максимум 500 символов.' });
       return;
     }
-    try {
-      res.json(await buddy.answer(question));
-    } catch {
-      res.status(502).json({ message: 'Buddy пока недоступен. Попробуй отправить вопрос ещё раз.' });
-    }
+    res.json(await buddy.answer(input));
   });
 
   app.post('/api/tasks/:taskId/runs', assignedTask, async (req, res) => {

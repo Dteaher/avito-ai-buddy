@@ -150,7 +150,9 @@ details[open] > summary > .disclosure { transform: rotate(180deg); }
 .suggestions button, .source-link { display: inline-flex; align-items: center; justify-content: space-between; gap: 9px; min-height: 37px; padding: 7px 10px; border: 1px solid #e3d7ee; border-radius: 9px; color: #563080; background: #faf7fc; font-size: 12px; font-weight: 680; text-align: left; transition: background-color 150ms ease, border-color 150ms ease; }
 .suggestions button:hover, .source-link:hover { background: #fff; border-color: #b48bda; }
 .source-link { justify-self: start; color: #005bbd; }
+.source-links { display: flex; flex-wrap: wrap; gap: 6px; }
 .source-link svg:first-child { color: var(--violet); }
+.fallback-note { color: #5c3981; font-size: 12px; font-weight: 680; }
 .pending { display: flex; align-items: center; gap: 8px; }
 .bubble .text-link { margin-top: 5px; }
 .chat-form { display: flex; align-items: center; gap: 6px; min-height: 49px; padding: 4px; margin-top: 8px; background: #fff; border: 1px solid #d8c5ef; border-radius: 13px; }
@@ -172,6 +174,7 @@ details[open] > summary > .disclosure { transform: rotate(180deg); }
 .dialog-content p { color: var(--muted); font-size: 13px; }
 .dialog-content ol, .run-context ol { padding-left: 22px; color: #514959; font-size: 14px; line-height: 1.65; }
 .dialog-content li + li, .run-context li + li { margin-top: 7px; }
+.dialog-content li:focus { background: #f1e9fb; outline: 2px solid #a981e6; outline-offset: 3px; border-radius: 3px; }
 
 .run-context { margin: 15px 0; padding: 13px 15px; background: #f8f6f4; border: 1px solid #eee9e4; border-radius: 13px; }
 .run-context .field-label:first-child { margin-top: 0; }

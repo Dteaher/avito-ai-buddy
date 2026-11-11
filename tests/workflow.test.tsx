@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../src/App';
 import { checks, listings, task } from '../server/scenario.ts';
-import type { CheckResult, Publication, Run, Workspace } from '../shared/contracts.ts';
+import type { BuddyAnswer, BuddyQuestion, CheckResult, Publication, Run, Workspace } from '../shared/contracts.ts';
 
 const workspace: Workspace = { task, checks: [...checks], buddyMode: 'guide' };
 const response = { status: 200, items: [listings[0]], rawBody: '{"items":[{"city":"kazan"}]}' };
@@ -23,15 +23,19 @@ afterEach(() => {
   window.history.replaceState(null, '', '/');
 });
 
-function api(options: { retryRun?: boolean; retryPublish?: boolean; retryBuddy?: boolean; result?: Run } = {}) {
+const guidance: BuddyAnswer = {
+  kind: 'guidance', text: 'Проверь содержимое ответа.', mode: 'guide', sources: [{ instructionId: task.instruction.id, ruleNumber: 3 }],
+};
+
+function api(options: { retryRun?: boolean; retryPublish?: boolean; retryBuddy?: boolean; result?: Run; answers?: BuddyAnswer[] } = {}) {
   let runs = 0;
   let publications = 0;
   let questions = 0;
-  const mock = vi.fn(async (url: string) => {
+  const mock = vi.fn<(url: string, init?: RequestInit) => Promise<Response>>(async (url) => {
     if (url === '/api/workspace') return Response.json(workspace);
     if (url.endsWith('/buddy')) {
       if (++questions === 1 && options.retryBuddy) throw new Error('Network error');
-      return Response.json({ text: 'Проверь содержимое ответа.', sourceId: task.instruction.id });
+      return Response.json(options.answers?.[questions - 1] ?? guidance);
     }
     if (url.endsWith('/runs')) {
       if (++runs === 1 && options.retryRun) return Response.json({ message: 'Сбой стенда' }, { status: 502 });
@@ -68,7 +72,7 @@ describe('First Check workspace', () => {
     await user.click(await screen.findByRole('button', { name: 'Ответа 200 достаточно?' }));
     await screen.findByText('Проверь содержимое ответа.');
     const buddy = screen.getByRole('complementary', { name: 'AI-buddy' });
-    expect(within(buddy).getByRole('button', { name: 'Тестовая инструкция' })).toBeTruthy();
+    expect(within(buddy).getByRole('button', { name: 'Тестовая инструкция · пункт 3' })).toBeTruthy();
     const launch = await prepare(user);
     await user.click(launch);
     await screen.findByText('Самара отсутствует');
@@ -137,5 +141,31 @@ describe('First Check workspace', () => {
     await user.click(within(failure).getByRole('button', { name: 'Повторить' }));
     expect(await screen.findByText('Проверь содержимое ответа.')).toBeTruthy();
     expect(screen.getAllByText('Ответа 200 достаточно?')).toHaveLength(1);
+  });
+
+  it('replies to a clarification and visibly labels the instruction fallback', async () => {
+    const mock = api({ answers: [
+      { kind: 'clarification', text: 'Был ли задан фильтр по городу?', mode: 'model', sources: [], clarificationId: 'issued-id' },
+      { ...guidance, mode: 'guide-fallback', sources: [{ instructionId: task.instruction.id, ruleNumber: 1 }] },
+      { kind: 'insufficient', text: 'В тестовой инструкции сведений об этом нет.', mode: 'guide-fallback', sources: [] },
+    ] });
+    const user = userEvent.setup();
+    render(<App />);
+    const input = await screen.findByRole('textbox', { name: 'Спросить Buddy' });
+    await user.type(input, 'В выдаче один город?{Enter}');
+    const buddy = screen.getByRole('complementary', { name: 'AI-buddy' });
+    await within(buddy).findByText('Был ли задан фильтр по городу?');
+    expect(within(buddy).queryByRole('button', { name: /пункт/ })).toBeNull();
+
+    await user.type(input, 'Нет{Enter}');
+    await within(buddy).findByText('Модель недоступна. Ответ из демо-справки.');
+    expect(within(buddy).getByRole('button', { name: 'Тестовая инструкция · пункт 1' })).toBeTruthy();
+    await user.type(input, 'Как получить доступ к продакшену?{Enter}');
+    await within(buddy).findByRole('button', { name: 'Открыть тестовую инструкцию' });
+    const questions = mock.mock.calls.filter(([url]) => url.endsWith('/buddy'))
+      .map(([, init]) => JSON.parse(String(init?.body)) as BuddyQuestion);
+    expect(questions).toEqual([
+      { question: 'В выдаче один город?' }, { question: 'Нет', clarificationId: 'issued-id' }, { question: 'Как получить доступ к продакшену?' },
+    ]);
   });
 });

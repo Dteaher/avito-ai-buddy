@@ -68,7 +68,20 @@ export interface Publication {
   run: Run;
 }
 
+export interface BuddyQuestion {
+  question: string;
+  clarificationId?: string;
+}
+
+export interface BuddySource {
+  instructionId: string;
+  ruleNumber: number;
+}
+
 export interface BuddyAnswer {
+  kind: 'guidance' | 'clarification' | 'insufficient' | 'action';
   text: string;
-  sourceId?: string;
+  mode: Workspace['buddyMode'] | 'guide-fallback';
+  sources: BuddySource[];
+  clarificationId?: string;
 }

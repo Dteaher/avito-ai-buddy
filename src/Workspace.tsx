@@ -82,7 +82,12 @@ export function Workspace({ data }: { data: WorkspaceData }) {
     }
   }
 
-  const openSource = () => dialog.current?.showModal();
+  function openSource(ruleNumber?: number) {
+    const node = dialog.current;
+    if (!node) return;
+    node.showModal();
+    if (ruleNumber !== undefined) node.querySelector<HTMLElement>(`[data-rule-number="${ruleNumber}"]`)?.focus();
+  }
 
   return (
     <main className="container workspace">
@@ -119,7 +124,7 @@ export function Workspace({ data }: { data: WorkspaceData }) {
                 <span className="brief-icon"><ListChecks size={22} /></span>
                 <div><h3>Что считаем правильным</h3><p>{task.criterion}</p></div>
               </div>
-              <button type="button" className="text-link instruction-link" onClick={openSource}><BookOpen size={18} /> Тестовая инструкция команды <ArrowUpRight size={15} /></button>
+              <button type="button" className="text-link instruction-link" onClick={() => openSource()}><BookOpen size={18} /> Тестовая инструкция команды <ArrowUpRight size={15} /></button>
               <div className="actions"><button type="button" className="button primary" onClick={() => move(1)}>Подготовить проверку <ArrowRight size={19} /></button></div>
             </>
           )}

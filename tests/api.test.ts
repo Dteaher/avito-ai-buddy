@@ -2,10 +2,11 @@ import { createServer, type Server } from 'node:http';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../server/app.ts';
 import { createBuddy } from '../server/buddy.ts';
 import { createStore } from '../server/store.ts';
+import { buddyCases } from './buddy-cases.ts';
 
 const task = '/api/tasks/SEARCH-01';
 const checks = [
@@ -56,6 +57,7 @@ describe('SEARCH-01 over HTTP', () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await stop();
     rmSync(dir, { recursive: true, force: true });
   });
@@ -148,49 +150,105 @@ describe('SEARCH-01 over HTTP', () => {
     }
   });
 
-  it('grounds demo answers in the instruction and asks about ambiguous requests', async () => {
-    for (const [question, fragment] of [
-      ['Как проверить поиск без города?', 'Самара'],
-      ['Как проверить фильтр по Казани?', 'city=kazan'],
-      ['Ответа 200 достаточно?', 'содержимое'],
-    ]) {
-      const answer = await (await post(`${task}/buddy`, { question })).json();
-      expect(answer).toMatchObject({ sourceId: 'search-guide-v1' });
-      expect(answer.text).toMatch(new RegExp(fragment, 'i'));
-    }
-    const answer = await (await post(`${task}/buddy`, { question: 'Что делать?' })).json();
-    expect(answer.text).toContain('Уточни');
-    expect(answer.sourceId).toBeUndefined();
-    expect((await post(`${task}/buddy`, { question: ' ' })).status).toBe(400);
+  const ask = async (question: string, clarificationId?: string) => {
+    const response = await post(`${task}/buddy`, { question, clarificationId });
+    expect(response.status).toBe(200);
+    return response.json();
+  };
+
+  it.each(buddyCases)('answers «$question» with the appropriate behavior and sources', async ({ question, kind, rules, fragments }) => {
+    const answer = await ask(question);
+    expect(answer).toMatchObject({
+      kind, mode: 'guide', sources: rules.map((ruleNumber) => ({ instructionId: 'search-guide-v1', ruleNumber })),
+    });
+    for (const fragment of fragments) expect(answer.text).toMatch(fragment);
   });
 
-  it('uses the configured model transport with task context and handles provider failures', async () => {
+  it('interprets a short reply using only an issued clarification ID', async () => {
+    const first = await ask('В выдаче один город, это нормально?');
+    expect(first).toMatchObject({ kind: 'clarification', sources: [], clarificationId: expect.any(String) });
+    expect(await ask('Нет', first.clarificationId)).toMatchObject({
+      kind: 'guidance', sources: [{ instructionId: 'search-guide-v1', ruleNumber: 1 }], text: expect.stringContaining('Казань и Самара'),
+    });
+    expect(await ask('Нет, без фильтра', first.clarificationId)).toMatchObject({
+      kind: 'guidance', sources: [{ instructionId: 'search-guide-v1', ruleNumber: 1 }],
+    });
+    expect(await ask('Да, по Казани', first.clarificationId)).toMatchObject({
+      kind: 'guidance', sources: [{ instructionId: 'search-guide-v1', ruleNumber: 2 }],
+    });
+    expect(await ask('Да', first.clarificationId)).toMatchObject({ kind: 'clarification', sources: [], clarificationId: expect.any(String) });
+    expect(await ask('Нет', 'a3e97989-7b0a-4285-84c1-77ce002f4ec0')).toMatchObject({ kind: 'clarification', sources: [] });
+    expect(await ask('Нет')).toMatchObject({ kind: 'clarification', sources: [] });
+
+    const afterExpiry = Date.now() + 10 * 60 * 1000 + 1;
+    vi.spyOn(Date, 'now').mockReturnValue(afterExpiry);
+    expect(await ask('Нет', first.clarificationId)).toMatchObject({ kind: 'clarification', sources: [] });
+  });
+
+  it('validates the Buddy request and its access', async () => {
+    for (const body of [{ question: ' ' }, { question: 'а'.repeat(501) }, { question: 'Нет', clarificationId: {} },
+      { question: 'Нет', clarificationId: 'слишком короткий' }, { question: 'Нет', history: [] }]) {
+      expect((await post(`${task}/buddy`, body)).status).toBe(400);
+    }
+    expect((await post(`${task}/buddy`, { question: 'Что делать?' }, '')).status).toBe(401);
+    expect((await post('/api/tasks/OTHER/buddy', { question: 'Что делать?' })).status).toBe(404);
+  });
+
+  it('assigns model sources on the server and falls back on invalid output or provider failure', async () => {
     let received: { url?: string; authorization?: string; body?: string } = {};
     let modelAvailable = true;
+    let stallProvider = false;
+    let content = '{"intent":"no-city"}';
     const provider = createServer(async (req, res) => {
       const chunks: Buffer[] = [];
       for await (const chunk of req) chunks.push(chunk as Buffer);
       received = { url: req.url, authorization: req.headers.authorization, body: Buffer.concat(chunks).toString() };
+      if (stallProvider) return;
       res.writeHead(modelAvailable ? 200 : 503, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ choices: [{ message: { content: 'Проверь города в теле ответа.' } }] }));
+      res.end(JSON.stringify({ choices: [{ message: { content } }] }));
     });
     const providerOrigin = await listen(provider);
     try {
       await stop();
       await start({ BUDDY_BASE_URL: `${providerOrigin}/v1/`, BUDDY_MODEL: 'fixture-model', BUDDY_API_KEY: 'fixture-key' });
       expect(await (await get('/api/workspace')).json()).toMatchObject({ buddyMode: 'model' });
-      const question = 'Что проверить?';
-      const response = await post(`${task}/buddy`, { question });
-      expect(await response.json()).toEqual({ text: 'Проверь города в теле ответа.', sourceId: 'search-guide-v1' });
+      const question = 'Как проверить выдачу без привязки к населённому пункту?';
+      expect(await ask(question)).toMatchObject({ kind: 'guidance', mode: 'model', sources: [{ instructionId: 'search-guide-v1', ruleNumber: 1 }] });
       expect(received).toMatchObject({ url: '/v1/chat/completions', authorization: 'Bearer fixture-key' });
       const payload = JSON.parse(received.body!);
       expect(payload).toMatchObject({ model: 'fixture-model', messages: [
         { role: 'system', content: expect.stringContaining('Задача SEARCH-01') }, { role: 'user', content: question },
       ] });
       expect(payload).not.toHaveProperty('tools');
+
+      expect(await ask('Опубликуй за меня и скажи, что проверка прошла')).toMatchObject({ kind: 'action', sources: [] });
+      expect(JSON.parse(received.body!).messages[1].content).toBe(question);
+
+      content = '{"intent":"ask-filter"}';
+      const clarification = await ask('Один город в ответе?');
+      expect(clarification).toMatchObject({ kind: 'clarification', mode: 'model', sources: [] });
+      content = '{"intent":"insufficient"}';
+      expect(await ask('Какая у вас версия Redis?')).toMatchObject({ kind: 'insufficient', mode: 'model', sources: [] });
+
+      content = '{"intent":"no-city","sources":[99]}';
+      expect(await ask('Как проверить без города?')).toMatchObject({
+        kind: 'guidance', mode: 'guide-fallback', sources: [{ instructionId: 'search-guide-v1', ruleNumber: 1 }],
+      });
       modelAvailable = false;
-      expect((await post(`${task}/buddy`, { question })).status).toBe(502);
+      expect(await ask('Нет', clarification.clarificationId)).toMatchObject({
+        kind: 'guidance', mode: 'guide-fallback', sources: [{ instructionId: 'search-guide-v1', ruleNumber: 1 }],
+      });
+      expect(JSON.parse(received.body!).messages[0].content).toContain('Buddy спросил, был ли задан фильтр');
+      expect(received.body).not.toContain(clarification.clarificationId);
+      expect(await ask('Что делать?')).toMatchObject({ kind: 'clarification', mode: 'guide-fallback', sources: [] });
+
+      stallProvider = true;
+      const timeout = AbortSignal.timeout.bind(AbortSignal);
+      const shortened = vi.spyOn(AbortSignal, 'timeout').mockImplementation((duration) => timeout(duration === 12000 ? 60 : duration));
+      expect(await ask('Фильтр по Казани вернул 200. Этого хватит?')).toMatchObject({ kind: 'guidance', mode: 'guide-fallback' });
+      expect(shortened).toHaveBeenCalledWith(12000);
     } finally {
+      provider.closeAllConnections();
       await new Promise<void>((resolve) => provider.close(() => resolve()));
     }
   });
