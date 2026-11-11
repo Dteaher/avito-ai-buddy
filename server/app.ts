@@ -1,0 +1,139 @@
+import { randomBytes } from 'node:crypto';
+import { resolve } from 'node:path';
+import express, { type ErrorRequestHandler, type Request, type RequestHandler } from 'express';
+import type { Workspace } from '../shared/contracts.ts';
+import type { createBuddy } from './buddy.ts';
+import { checks, executeRun, isObject, listings, parseChecks, task, trainee } from './scenario.ts';
+import type { createStore } from './store.ts';
+
+interface AppOptions {
+  store: ReturnType<typeof createStore>;
+  standOrigin: () => string;
+  buddy: ReturnType<typeof createBuddy>;
+  staticDir?: string;
+}
+
+export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) {
+  const app = express();
+  app.disable('x-powered-by');
+  const cookieName = 'buddy_session';
+  const session = randomBytes(24).toString('hex');
+
+  app.use((req, res, next) => {
+    if (!/^(?:127\.0\.0\.1|localhost)(?::\d+)?$/.test(req.get('host') ?? '')) {
+      res.status(403).json({ message: 'Откройте приложение на localhost.' });
+      return;
+    }
+    const origin = req.get('origin');
+    if (req.method === 'POST' && origin && origin !== `http://${req.get('host')}`) {
+      res.status(403).json({ message: 'Запрос из другого источника отклонён.' });
+      return;
+    }
+    next();
+  });
+
+  app.get('/demo/search', (req, res) => {
+    const filters = Object.keys(req.query);
+    if (filters.length && !(filters.length === 1 && req.query.city === 'kazan')) {
+      res.status(400).json({ message: 'Доступен только фильтр city=kazan.' });
+      return;
+    }
+    // В запросе без фильтра стенд намеренно теряет объявление из Самары.
+    res.json({ items: listings.filter(({ city }) => city === 'kazan') });
+  });
+
+  app.use('/api', (_req, res, next) => {
+    res.set('Cache-Control', 'no-store');
+    next();
+  });
+  app.get('/api/workspace', (_req, res) => {
+    res.cookie(cookieName, session, { httpOnly: true, sameSite: 'strict', path: '/api' });
+    const workspace: Workspace = { task, checks: [...checks], buddyMode: buddy.mode };
+    res.json(workspace);
+  });
+
+  const hasSession = (req: Request) => req.headers.cookie?.split(';').some((entry) => entry.trim() === `${cookieName}=${session}`);
+  app.use('/api', (req, res, next) => {
+    if (!hasSession(req)) {
+      res.status(401).json({ message: 'Демо-сессия истекла. Обнови страницу.' });
+      return;
+    }
+    next();
+  });
+  app.use('/api', express.json({ limit: '8kb' }));
+
+  const assignedTask: RequestHandler = (req, res, next) => {
+    if (req.params.taskId !== task.id) {
+      res.status(404).json({ message: 'Задача недоступна в этой сессии.' });
+      return;
+    }
+    next();
+  };
+
+  app.post('/api/tasks/:taskId/buddy', assignedTask, async (req, res) => {
+    const question = isObject(req.body) && typeof req.body.question === 'string' ? req.body.question.trim() : '';
+    if (!question || question.length > 500) {
+      res.status(400).json({ message: 'Введи вопрос длиной до 500 символов.' });
+      return;
+    }
+    try {
+      res.json(await buddy.answer(question));
+    } catch {
+      res.status(502).json({ message: 'Buddy пока недоступен. Попробуй отправить вопрос ещё раз.' });
+    }
+  });
+
+  app.post('/api/tasks/:taskId/runs', assignedTask, async (req, res) => {
+    const inputs = parseChecks(req.body);
+    if (!inputs) {
+      res.status(400).json({ message: 'Выбери ожидаемые города для обоих разрешённых запросов.' });
+      return;
+    }
+    let run;
+    try {
+      run = await executeRun(standOrigin(), inputs);
+    } catch {
+      res.status(502).json({ message: 'Стенд не ответил как ожидалось. Повтори запуск, выбранные города сохранены.' });
+      return;
+    }
+    store.saveRun(run, trainee);
+    res.status(201).json(run);
+  });
+
+  app.post('/api/tasks/:taskId/runs/:runId/publication', assignedTask, (req, res) => {
+    const { record, created } = store.publish(String(req.params.runId), trainee, task.id);
+    if (!record) {
+      res.status(404).json({ message: 'Прогон недоступен в этой сессии.' });
+      return;
+    }
+    res.status(created ? 201 : 200).json(record);
+  });
+
+  app.get('/api/records/:id', (req, res) => {
+    const record = store.readRecord(req.params.id, trainee, task.id);
+    if (!record) {
+      res.status(404).json({ message: 'Запись не найдена. Проверь ссылку или открой рабочее пространство.' });
+      return;
+    }
+    res.json(record);
+  });
+
+  app.use(['/api', '/demo'], (_req, res) => res.status(404).json({ message: 'Маршрут не найден.' }));
+
+  if (staticDir) {
+    app.use(express.static(staticDir));
+    app.get(['/', '/records/:id'], (_req, res) => res.sendFile(resolve(staticDir, 'index.html')));
+  }
+
+  const onError: ErrorRequestHandler = (error, _req, res, next) => {
+    if (res.headersSent) return next(error);
+    if (error.status === 400 || error.status === 413) {
+      res.status(error.status).json({ message: 'Запрос слишком большой или содержит некорректный JSON.' });
+      return;
+    }
+    console.error('Ошибка приложения', error);
+    res.status(500).json({ message: 'Сервис временно недоступен. Попробуй ещё раз.' });
+  };
+  app.use(onError);
+  return app;
+}

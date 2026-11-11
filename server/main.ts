@@ -1,0 +1,18 @@
+import { resolve } from 'node:path';
+import { createApp } from './app.ts';
+import { createBuddy } from './buddy.ts';
+import { createStore } from './store.ts';
+
+const port = Number(process.env.PORT ?? 3001);
+if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT должен быть от 1 до 65535');
+
+const origin = `http://127.0.0.1:${port}`;
+const store = createStore(resolve('.data', 'buddy.sqlite'));
+const app = createApp({ store, standOrigin: () => origin, buddy: createBuddy(process.env), staticDir: resolve('dist') });
+const server = app.listen(port, '127.0.0.1', () => console.log(`AI-buddy · ${origin}`));
+
+function stop() {
+  server.close(() => store.close());
+}
+process.once('SIGINT', stop);
+process.once('SIGTERM', stop);
