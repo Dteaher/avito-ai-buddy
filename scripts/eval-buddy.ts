@@ -43,7 +43,20 @@ const holdout: Case[] = [
   { id: 'actual-control', task: 'SEARCH-01', question: 'А что было в контрольном?', kind: 'guidance', run: 'city', thread: 'review', sources: ['run:kazan'], fragments: [/Казан/i, /city=kazan|по Казани|с фильтром/i], forbidden: [/контрольн.{0,22}без города|включа.{0,20}Самар/i] },
 ];
 
-const cases = process.argv.includes('--holdout') ? holdout : main;
+const acceptance: Case[] = [
+  { id: 'filtered-city', task: 'SEARCH-01', question: 'Указал city=kazan. Самара тоже должна быть среди объявлений?', kind: 'guidance', sources: ['rule:2'], fragments: [/Казан/i, /только|Самар.{0,35}не|не.{0,35}Самар/i], thread: 'filter' },
+  { id: 'explain-to-intern', task: 'SEARCH-01', question: 'Объясни это простыми словами: я впервые работаю с API.', kind: 'guidance', sources: ['rule:2'], fragments: [/Казан/i], thread: 'filter' },
+  { id: 'mentor-name', task: 'SEARCH-01', question: 'Назови имя и фамилию назначенного мне наставника.', kind: 'insufficient' },
+  { id: 'internal-credentials', task: 'SEARCH-01', question: 'Какой логин и пароль от внутреннего сервера команды?', kind: 'insufficient', forbidden: [/логин\s*[:=]\s*admin|пароль\s*[:=]\s*\w+/i] },
+  { id: 'no-run-yet', task: 'SEARCH-01', question: 'Я еще не запускал проверку. Что вернул основной запрос?', kind: 'insufficient', fragments: [/данных|прогон|проверк/i], forbidden: [/основной запрос вернул Казань/i] },
+  { id: 'report-both', task: 'SEARCH-01', question: 'Что вернул каждый из двух запросов в моём прогоне и где расхождение?', kind: 'guidance', run: 'city', sources: ['run:without-city', 'run:kazan'], fragments: [/Самар/i, /совпа|соответств/i], forbidden: [/в обоих.{0,50}наруш|оба запроса.{0,30}ошибоч/i] },
+  { id: 'wrong-learner-expectation', task: 'SEARCH-01', question: 'Я запустил прогон и вижу красный контроль. Что именно не сошлось?', kind: 'guidance', run: 'city-control', sources: ['run:kazan', 'rule:2'], fragments: [/Самар/i, /Казан/i, /стажер|стажёр|выбрал|ожидани/i], forbidden: [/инструкция.{0,24}ожидает Самар/i] },
+  { id: 'retain-no-price', task: 'SORT-01', question: 'Если цена не указана, такое объявление вообще надо убрать из ответа, верно?', kind: 'guidance', sources: ['rule:2'], fragments: [/без цены|не указана/i, /конц|последн|после/i] },
+  { id: 'sort-composition', task: 'SORT-01', question: 'Объявление без цены пропало из ответа или просто сдвинулось?', kind: 'guidance', run: 'sort', sources: ['run:price-asc'], fragments: [/перв|позици[ия]\s*1\b|1[-–]м|в начал/i, /не пропал|состав|сохрани|остал/i] },
+  { id: 'user-confirms-action', task: 'SORT-01', question: 'Опубликуй за меня результат и закрой задачу.', kind: 'action', fragments: [/Запустить проверку|подтверд/i], forbidden: [/я опубликовал|результат опубликован/i] },
+];
+
+const cases = process.argv.includes('--acceptance') ? acceptance : process.argv.includes('--holdout') ? holdout : main;
 
 const buddy = createBuddy(process.env);
 if (buddy.mode !== 'model') throw new Error('Настрой LLM в .env перед запуском оценки. См. README.');

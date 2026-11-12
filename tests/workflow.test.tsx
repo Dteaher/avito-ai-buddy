@@ -176,6 +176,29 @@ describe('First Check workspace', () => {
     expect(screen.getAllByText('Ответа 200 достаточно?')).toHaveLength(1);
   });
 
+  it('keeps task preparation and execution available while the model is replying', async () => {
+    const mock = api();
+    const implementation = mock.getMockImplementation()!;
+    let finishReply!: (response: Response) => void;
+    mock.mockImplementation((url, options) => url.endsWith('/buddy')
+      ? new Promise<Response>((resolve) => { finishReply = resolve; }) : implementation(url, options));
+    const user = userEvent.setup();
+    render(<App />);
+    const input = await screen.findByRole('textbox', { name: 'Спросить Buddy' });
+    await user.type(input, 'Как проверить город?{Enter}');
+    expect((await screen.findByRole('status')).textContent).toContain('Buddy отвечает');
+    const launch = await prepare(user);
+    await user.type(input, 'Уточню после ответа');
+    expect((input as HTMLTextAreaElement).value).toBe('Уточню после ответа');
+    await user.click(launch);
+    await screen.findByText('Самара отсутствует');
+    expect(screen.getByRole('status').textContent).toContain('Buddy отвечает');
+    finishReply(Response.json(guidance));
+    await screen.findByText(guidance.text);
+    expect(screen.queryByRole('status')).toBeNull();
+    expect((input as HTMLTextAreaElement).value).toBe('Уточню после ответа');
+  });
+
   it('asks about the current run and continues the model conversation', async () => {
     const mock = api({ answers: [
       { kind: 'guidance', text: 'Самара отсутствует в основном запросе.', mode: 'model', conversationId: 'conversation-1',

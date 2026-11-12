@@ -153,6 +153,88 @@ describe('SEARCH-01 over HTTP', () => {
     expect(result.checks[1]).toMatchObject({ expectedCities: [], matches: false, extra: ['kazan'], followsRule: false });
   });
 
+  it('compares all city expectations against empty, full and partial stand responses', async () => {
+    const selections = [[], ['kazan'], ['samara'], ['kazan', 'samara']];
+    let actual = selections[0];
+    const fixture = createServer((_req, res) => res.setHeader('content-type', 'application/json')
+      .end(JSON.stringify({ items: actual.map((city, index) => ({ id: `fixture-${index}`, title: 'Тестовое объявление', city })) })));
+    standBase = await listen(fixture);
+    try {
+      for (actual of selections) for (const primary of selections) for (const control of selections) {
+        const response = await run([{ id: 'without-city', expectedCities: primary }, { id: 'kazan', expectedCities: control }]);
+        expect(response.status).toBe(201);
+        const result = await response.json();
+        for (const [index, expected] of [primary, control].entries()) {
+          const rule = index === 0 ? ['kazan', 'samara'] : ['kazan'];
+          expect(result.checks[index]).toMatchObject({
+            actualCities: actual, expectedCities: expected,
+            matches: expected.length === actual.length && expected.every((city) => actual.includes(city)),
+            followsRule: expected.length === rule.length && expected.every((city) => rule.includes(city)),
+            missing: expected.filter((city) => !actual.includes(city)), extra: actual.filter((city) => !expected.includes(city)),
+          });
+        }
+      }
+    } finally {
+      await new Promise<void>((resolve) => fixture.close(() => resolve()));
+    }
+  });
+
+  it('compares every price permutation independently from the expected and required orders', async () => {
+    const permutations = [
+      ['ad-201', 'ad-202', 'ad-203'], ['ad-201', 'ad-203', 'ad-202'], ['ad-202', 'ad-201', 'ad-203'],
+      ['ad-202', 'ad-203', 'ad-201'], ['ad-203', 'ad-201', 'ad-202'], ['ad-203', 'ad-202', 'ad-201'],
+    ];
+    const prices: Record<string, number | null> = { 'ad-201': 500, 'ad-202': 900, 'ad-203': null };
+    let actual = permutations[0];
+    const fixture = createServer((_req, res) => res.setHeader('content-type', 'application/json')
+      .end(JSON.stringify({ items: actual.map((id) => ({ id, title: 'Тестовое объявление', price: prices[id] })) })));
+    standBase = await listen(fixture);
+    try {
+      for (actual of permutations) for (const expectedOrder of permutations) {
+        const response = await post('/api/tasks/SORT-01/runs', { checks: [{ id: 'price-asc', expectedOrder }] });
+        expect(response.status).toBe(201);
+        const result = await response.json();
+        expect(result.checks[0]).toMatchObject({
+          actualOrder: actual, expectedOrder, sameItems: true,
+          matches: actual.join() === expectedOrder.join(), followsRule: expectedOrder.join() === permutations[0].join(),
+        });
+      }
+    } finally {
+      await new Promise<void>((resolve) => fixture.close(() => resolve()));
+    }
+  });
+
+  it.each([
+    ['invalid JSON', '{', 200], ['missing items', '{}', 200], ['invalid items', '{"items":null}', 200],
+    ['invalid listing', '{"items":[{"id":"x","title":"Тест","city":42,"price":"500"}]}', 200],
+    ['HTTP failure', '{"items":[]}', 503], ['redirect', '{"items":[]}', 302],
+  ])('recovers both tasks after a stand response with %s', async (_name, body, status) => {
+    const fixture = createServer((_req, res) => res.writeHead(status, { 'content-type': 'application/json', location: `${base}/demo/search` }).end(body));
+    standBase = await listen(fixture);
+    const priceInput = { checks: [{ id: 'price-asc', expectedOrder: ['ad-201', 'ad-202', 'ad-203'] }] };
+    try {
+      expect((await run()).status).toBe(502);
+      expect((await post('/api/tasks/SORT-01/runs', priceInput)).status).toBe(502);
+      standBase = base;
+      expect((await run()).status).toBe(201);
+      expect((await post('/api/tasks/SORT-01/runs', priceInput)).status).toBe(201);
+    } finally {
+      await new Promise<void>((resolve) => fixture.close(() => resolve()));
+    }
+  });
+
+  it('denies reading, explaining and publishing an existing run owned by another trainee', async () => {
+    const own = await (await run()).json();
+    const foreign = { ...own, id: '1a34c051-daf0-4d70-97f1-7490753650bc' };
+    store.saveRun(foreign, 'other-trainee');
+    const published = store.publish(foreign.id, 'other-trainee', 'SEARCH-01').record!;
+    expect((await get(`${task}/runs/${foreign.id}`)).status).toBe(404);
+    expect((await post(`${task}/buddy`, { question: 'Что показал прогон?', runId: foreign.id })).status).toBe(404);
+    expect((await post(`${task}/runs/${foreign.id}/publication`)).status).toBe(404);
+    expect((await get(`/api${published.url}`)).status).toBe(404);
+    expect((await get(`${task}/runs/${own.id}`)).status).toBe(200);
+  });
+
   it('rejects unknown checks, malformed expectations and client URLs', async () => {
     for (const invalid of [null, [], [checks[0], checks[0]], [checks[0], { ...checks[1], id: 'samara' }],
       [checks[0], { ...checks[1], expectedCities: ['kazan', 'kazan'] }],
