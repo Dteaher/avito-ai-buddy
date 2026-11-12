@@ -4,7 +4,10 @@ import express, { type ErrorRequestHandler, type Request, type RequestHandler } 
 import type { Workspace } from '../shared/contracts.ts';
 import { parseBuddyQuestion, type createBuddy } from './buddy.ts';
 import { checks, executeRun, listings, parseChecks, task, trainee } from './scenario.ts';
+import { executePriceRun, parsePriceCheck, priceCheck, priceItems, sortTask } from './price-scenario.ts';
 import type { createStore } from './store.ts';
+
+const assignedTasks = [task, sortTask];
 
 interface AppOptions {
   store: ReturnType<typeof createStore>;
@@ -34,8 +37,14 @@ export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) 
 
   app.get('/demo/search', (req, res) => {
     const filters = Object.keys(req.query);
+    if (filters.length === 1 && req.query.sort === 'price_asc') {
+      // Намеренный дефект: null идёт первым, хотя состав выдачи полный.
+      const items = priceItems.toSorted((a, b) => (a.price ?? -Infinity) - (b.price ?? -Infinity));
+      res.json({ items });
+      return;
+    }
     if (filters.length && !(filters.length === 1 && req.query.city === 'kazan')) {
-      res.status(400).json({ message: 'Доступен только фильтр city=kazan.' });
+      res.status(400).json({ message: 'Разрешены запрос без параметров, city=kazan и sort=price_asc.' });
       return;
     }
     // В запросе без фильтра стенд намеренно теряет объявление из Самары.
@@ -46,9 +55,17 @@ export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) 
     res.set('Cache-Control', 'no-store');
     next();
   });
-  app.get('/api/workspace', (_req, res) => {
+  app.get('/api/workspace', (req, res) => {
+    const selected = req.query.task ?? task.id;
+    if (!assignedTasks.some(({ id }) => id === selected)) {
+      res.status(404).json({ message: 'Задача недоступна в этой сессии.' });
+      return;
+    }
     res.cookie(cookieName, session, { httpOnly: true, sameSite: 'strict', path: '/api' });
-    const workspace: Workspace = { task, checks: [...checks], buddyMode: buddy.mode };
+    const context = { tasks: assignedTasks, buddyMode: buddy.mode };
+    const workspace: Workspace = selected === sortTask.id
+      ? { ...context, kind: 'price-order', task: sortTask, checks: [priceCheck], orderItems: priceItems }
+      : { ...context, task, checks: [...checks] };
     res.json(workspace);
   });
 
@@ -63,7 +80,7 @@ export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) 
   app.use('/api', express.json({ limit: '8kb' }));
 
   const assignedTask: RequestHandler = (req, res, next) => {
-    if (req.params.taskId !== task.id) {
+    if (!assignedTasks.some(({ id }) => id === req.params.taskId)) {
       res.status(404).json({ message: 'Задача недоступна в этой сессии.' });
       return;
     }
@@ -76,18 +93,22 @@ export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) 
       res.status(400).json({ message: 'Проверь вопрос и попробуй ещё раз. Максимум 500 символов.' });
       return;
     }
-    res.json(await buddy.answer(input));
+    res.json(await buddy.answer(req.params.taskId === sortTask.id ? sortTask : task, input));
   });
 
   app.post('/api/tasks/:taskId/runs', assignedTask, async (req, res) => {
-    const inputs = parseChecks(req.body);
-    if (!inputs) {
-      res.status(400).json({ message: 'Выбери ожидаемые города для обоих разрешённых запросов.' });
+    const priceTask = req.params.taskId === sortTask.id;
+    const order = priceTask ? parsePriceCheck(req.body) : undefined;
+    const cities = priceTask ? undefined : parseChecks(req.body);
+    if (!order && !cities) {
+      res.status(400).json({ message: priceTask
+        ? 'Задай ожидаемый порядок всех трёх объявлений.'
+        : 'Выбери ожидаемые города для обоих разрешённых запросов.' });
       return;
     }
     let run;
     try {
-      run = await executeRun(standOrigin(), inputs);
+      run = order ? await executePriceRun(standOrigin(), order) : await executeRun(standOrigin(), cities!);
     } catch {
       res.status(502).json({ message: 'Стенд не ответил как ожидалось. Повтори запуск, выбранные города сохранены.' });
       return;
@@ -97,7 +118,7 @@ export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) 
   });
 
   app.post('/api/tasks/:taskId/runs/:runId/publication', assignedTask, (req, res) => {
-    const { record, created } = store.publish(String(req.params.runId), trainee, task.id);
+    const { record, created } = store.publish(String(req.params.runId), trainee, String(req.params.taskId));
     if (!record) {
       res.status(404).json({ message: 'Прогон недоступен в этой сессии.' });
       return;
@@ -106,8 +127,8 @@ export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) 
   });
 
   app.get('/api/records/:id', (req, res) => {
-    const record = store.readRecord(req.params.id, trainee, task.id);
-    if (!record) {
+    const record = store.readRecord(req.params.id, trainee);
+    if (!record || !assignedTasks.some(({ id }) => id === record.run.task.id)) {
       res.status(404).json({ message: 'Запись не найдена. Проверь ссылку или открой рабочее пространство.' });
       return;
     }

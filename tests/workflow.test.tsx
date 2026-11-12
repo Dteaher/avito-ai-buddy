@@ -4,11 +4,12 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../src/App';
 import { checks, listings, task } from '../server/scenario.ts';
-import type { BuddyAnswer, BuddyQuestion, CheckResult, Publication, Run, Workspace } from '../shared/contracts.ts';
+import { priceCheck, priceItems, sortTask } from '../server/price-scenario.ts';
+import type { BuddyAnswer, BuddyQuestion, CheckResult, CityRun, Publication, Run, Workspace } from '../shared/contracts.ts';
 
-const workspace: Workspace = { task, checks: [...checks], buddyMode: 'guide' };
+const workspace: Workspace = { task, tasks: [task], checks: [...checks], buddyMode: 'guide' };
 const response = { status: 200, items: [listings[0]], rawBody: '{"items":[{"city":"kazan"}]}' };
-const run: Run = {
+const run: CityRun = {
   id: 'run-1', task, checkedAt: '2026-11-12T10:00:00.000Z',
   checks: [
     { ...checks[0], ...response, actualCities: ['kazan'], expectedCities: ['kazan', 'samara'], ruleCities: ['kazan', 'samara'], missing: ['samara'], extra: [], matches: false, followsRule: true },
@@ -27,12 +28,12 @@ const guidance: BuddyAnswer = {
   kind: 'guidance', text: 'Проверь содержимое ответа.', mode: 'guide', sources: [{ instructionId: task.instruction.id, ruleNumber: 3 }],
 };
 
-function api(options: { retryRun?: boolean; retryPublish?: boolean; retryBuddy?: boolean; result?: Run; answers?: BuddyAnswer[] } = {}) {
+function api(options: { retryRun?: boolean; retryPublish?: boolean; retryBuddy?: boolean; result?: Run; answers?: BuddyAnswer[]; workspace?: Workspace } = {}) {
   let runs = 0;
   let publications = 0;
   let questions = 0;
   const mock = vi.fn<(url: string, init?: RequestInit) => Promise<Response>>(async (url) => {
-    if (url === '/api/workspace') return Response.json(workspace);
+    if (url.startsWith('/api/workspace')) return Response.json(options.workspace ?? workspace);
     if (url.endsWith('/buddy')) {
       if (++questions === 1 && options.retryBuddy) throw new Error('Network error');
       return Response.json(options.answers?.[questions - 1] ?? guidance);
@@ -65,6 +66,34 @@ async function prepare(user: ReturnType<typeof userEvent.setup>) {
 }
 
 describe('First Check workspace', () => {
+  it('captures a learner-defined price order and explains which item moved', async () => {
+    window.history.replaceState(null, '', '/?task=SORT-01');
+    const expectedOrder = ['ad-201', 'ad-202', 'ad-203'];
+    const items = [priceItems[1], priceItems[2], priceItems[0]];
+    const mock = api({
+      workspace: { kind: 'price-order', task: sortTask, tasks: [task, sortTask], checks: [priceCheck], orderItems: priceItems, buddyMode: 'guide' },
+      result: { kind: 'price-order', id: 'sort-1', task: sortTask, checkedAt: run.checkedAt, checks: [{
+        ...priceCheck, expectedOrder, actualOrder: items.map(({ id }) => id), ruleOrder: expectedOrder, fixtures: priceItems,
+        items, rawBody: JSON.stringify({ items }), status: 200, sameItems: true, matches: false, followsRule: true,
+      }] },
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole('button', { name: 'Подготовить проверку' }));
+    const launch = screen.getByRole<HTMLButtonElement>('button', { name: 'Запустить проверку' });
+    expect(launch.disabled).toBe(true);
+    await user.click(screen.getByRole('button', { name: /500 ₽/ }));
+    await user.click(screen.getByRole('button', { name: /Без цены/ }));
+    await user.click(screen.getByRole('button', { name: 'Отменить последний выбор' }));
+    await user.click(screen.getByRole('button', { name: /900 ₽/ }));
+    await user.click(screen.getByRole('button', { name: /Без цены/ }));
+    await user.click(launch);
+    await screen.findByText('Состав совпал. Порядок отличается.');
+    expect(screen.getByText(/на 1-м месте вместо 3-го/)).toBeTruthy();
+    const sent = mock.mock.calls.find(([url]) => url === '/api/tasks/SORT-01/runs');
+    expect(JSON.parse(String(sent?.[1]?.body))).toEqual({ checks: [{ id: 'price-asc', expectedOrder }] });
+    expect(mock.mock.calls.some(([url]) => url.endsWith('/buddy'))).toBe(false);
+  });
   it('links the source, compares both responses and publishes after confirmation', async () => {
     const mock = api();
     const user = userEvent.setup();

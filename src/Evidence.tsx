@@ -1,11 +1,14 @@
 import { ArrowRight, Check, ChevronDown, CircleAlert, Clock3, Terminal, X } from 'lucide-react';
-import { cities, type CheckResult, type City, type Run } from '../shared/contracts';
+import { cities, type CheckResult, type City, type PriceResult, type Run } from '../shared/contracts';
+import { PriceComparison, priceLabel } from './PriceOrder';
+
+type ResponseCheck = CheckResult | PriceResult;
 
 export function formatTime(time: string) {
   return new Intl.DateTimeFormat('ru-RU', { dateStyle: 'short', timeStyle: 'short' }).format(new Date(time));
 }
 
-function RequestLine({ check }: { check: CheckResult }) {
+function RequestLine({ check }: { check: ResponseCheck }) {
   return <span className="endpoint"><span>GET</span><code>{check.path}</code></span>;
 }
 
@@ -48,13 +51,13 @@ function Comparison({ check }: { check: CheckResult }) {
   );
 }
 
-function ResponseBody({ check }: { check: CheckResult }) {
+function ResponseBody({ check }: { check: ResponseCheck }) {
   return (
     <div className="response-body">
       <p>Параметр <code>{check.parameter}</code></p>
       {check.items.length ? (
-        <ul className="listings">{check.items.map((item) => (
-          <li key={item.id}><strong>{item.title}</strong><span>{cities[item.city]} · <code>{item.id}</code></span></li>
+        <ul className="listings">{check.items.map((item, index) => (
+          <li key={`${item.id}-${index}`}><strong>{item.title}</strong><span>{'price' in item ? priceLabel(item.price) : cities[item.city]} · <code>{item.id}</code></span></li>
         ))}</ul>
       ) : <p>Стенд вернул пустой список объявлений.</p>}
       <details className="raw"><summary>Сырое тело ответа <ChevronDown size={15} className="disclosure" /></summary><pre>{check.rawBody}</pre></details>
@@ -62,7 +65,7 @@ function ResponseBody({ check }: { check: CheckResult }) {
   );
 }
 
-function ResponseDetails({ check }: { check: CheckResult }) {
+function ResponseDetails({ check }: { check: ResponseCheck }) {
   return (
     <details className="response-details">
       <summary><Terminal size={16} /> Ответ стенда · HTTP {check.status} <ChevronDown size={17} className="disclosure" /></summary>
@@ -72,6 +75,16 @@ function ResponseDetails({ check }: { check: CheckResult }) {
 }
 
 export function Evidence({ run, animate = false }: { run: Run; animate?: boolean }) {
+  if (run.kind === 'price-order') {
+    const [check] = run.checks;
+    return (
+      <section className={`evidence${animate ? ' reveal' : ''}`} aria-label="Основной запрос">
+        <div className="request-heading"><RequestLine check={check} /><span className="http-status">HTTP {check.status}</span></div>
+        <PriceComparison check={check} />
+        <ResponseDetails check={check} />
+      </section>
+    );
+  }
   const [primary, control] = run.checks;
   return (
     <div className={`evidence${animate ? ' reveal' : ''}`}>

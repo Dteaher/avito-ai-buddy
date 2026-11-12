@@ -3,7 +3,7 @@ import { ArrowDownRight, ArrowLeft, ArrowUpRight, Check, CircleAlert, LoaderCirc
 import type { Publication, Workspace as WorkspaceData } from '../shared/contracts';
 import { errorMessage, request } from './api';
 import { Evidence, RunContext, formatTime } from './Evidence';
-import { Workspace } from './Workspace';
+import { NextTask, Workspace } from './Workspace';
 
 type Loaded = { workspace: WorkspaceData; publication?: Publication };
 
@@ -26,6 +26,7 @@ function Header() {
 
 export function App() {
   const recordId = /^\/records\/([^/]+)\/?$/.exec(window.location.pathname)?.[1];
+  const selectedTask = new URLSearchParams(window.location.search).get('task');
   const [data, setData] = useState<Loaded>();
   const [error, setError] = useState('');
   const [attempt, setAttempt] = useState(0);
@@ -35,7 +36,8 @@ export function App() {
     const options = { signal: controller.signal };
     async function open() {
       try {
-        const workspace = await request<WorkspaceData>('/api/workspace', options);
+        const workspacePath = !recordId && selectedTask ? `/api/workspace?task=${encodeURIComponent(selectedTask)}` : '/api/workspace';
+        const workspace = await request<WorkspaceData>(workspacePath, options);
         const publication = recordId ? await request<Publication>(`/api/records/${recordId}`, options) : undefined;
         if (!controller.signal.aborted) setData({ workspace, publication });
       } catch (reason) {
@@ -44,7 +46,7 @@ export function App() {
     }
     void open();
     return () => controller.abort();
-  }, [attempt, recordId]);
+  }, [attempt, recordId, selectedTask]);
 
   return (
     <>
@@ -69,7 +71,7 @@ function Record({ publication }: { publication: Publication }) {
   const { id, run, publishedAt } = publication;
   return (
     <main className="container record-page">
-      <a href="/" className="text-link back-link"><ArrowLeft size={17} /> К рабочему пространству</a>
+      <a href={run.kind === 'price-order' ? `/?task=${encodeURIComponent(run.task.id)}` : '/'} className="text-link back-link"><ArrowLeft size={17} /> К рабочему пространству</a>
       <div className="record-hero">
         <span className="task-key">{run.task.id}</span>
         <h1>Запись проверки</h1>
@@ -83,6 +85,7 @@ function Record({ publication }: { publication: Publication }) {
         </div>
         <RunContext run={run} showRules />
         <Evidence run={run} />
+        {run.kind !== 'price-order' && <NextTask />}
       </section>
     </main>
   );

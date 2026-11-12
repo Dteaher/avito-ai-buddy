@@ -81,6 +81,57 @@ describe('SEARCH-01 over HTTP', () => {
     expect(JSON.parse(result.checks[0].rawBody)).toEqual({ items: result.checks[0].items });
   });
 
+  it('compares price order, persists the right task and rejects a foreign run', async () => {
+    const sortTask = '/api/tasks/SORT-01';
+    const workspace = await (await get('/api/workspace?task=SORT-01')).json();
+    expect(workspace.task.id).toBe('SORT-01');
+    expect(workspace.tasks.map(({ id }: { id: string }) => id)).toEqual(['SEARCH-01', 'SORT-01']);
+    const expectedOrder = ['ad-201', 'ad-202', 'ad-203'];
+    const input = { id: 'price-asc', expectedOrder };
+    for (const bad of [{ ...input, path: 'https://example.com' }, { ...input, expectedOrder: ['ad-201', 'ad-201', 'ad-203'] },
+      { ...input, expectedOrder: ['ad-201', 'ad-202', 'unknown'] }, { id: 'kazan', expectedCities: ['kazan'] }]) {
+      expect((await post(`${sortTask}/runs`, { checks: [bad] })).status).toBe(400);
+    }
+    expect((await get('/demo/search?sort=price_asc&city=kazan')).status).toBe(400);
+    const response = await post(`${sortTask}/runs`, { checks: [input] });
+    expect(response.status).toBe(201);
+    const result = await response.json();
+    expect(result).toMatchObject({ kind: 'price-order', task: { id: 'SORT-01' }, checks: [{
+      expectedOrder, actualOrder: ['ad-203', 'ad-201', 'ad-202'], sameItems: true, matches: false, followsRule: true, status: 200,
+    }] });
+    expect(JSON.parse(result.checks[0].rawBody).items[0]).toMatchObject({ id: 'ad-203', price: null });
+    const alternate = await (await post(`${sortTask}/runs`, { checks: [{ ...input, expectedOrder: result.checks[0].actualOrder }] })).json();
+    expect(alternate.checks[0]).toMatchObject({ matches: true, followsRule: false });
+    expect((await post(`${task}/runs/${result.id}/publication`)).status).toBe(404);
+    const publish = () => post(`${sortTask}/runs/${result.id}/publication`);
+    const record = await (await publish()).json();
+    expect(await (await publish()).json()).toEqual(record);
+    await stop();
+    await start();
+    expect(await (await get(`/api${record.url}`)).json()).toEqual(record);
+    expect(record.run).toEqual(result);
+  });
+
+  it('uses the stand response to distinguish order and composition independently', async () => {
+    const items = [
+      { id: 'ad-201', title: 'Настольная лампа', price: 500 },
+      { id: 'ad-202', title: 'Книжная полка', price: 900 },
+      { id: 'ad-203', title: 'Подставка', price: null },
+    ];
+    let count = 3;
+    const fixture = createServer((_req, res) => res.setHeader('content-type', 'application/json').end(JSON.stringify({ items: items.slice(0, count) })));
+    standBase = await listen(fixture);
+    try {
+      const check = { id: 'price-asc', expectedOrder: items.map(({ id }) => id) };
+      const runSort = async () => (await post('/api/tasks/SORT-01/runs', { checks: [check] })).json();
+      expect((await runSort()).checks[0]).toMatchObject({ matches: true, sameItems: true });
+      count = 2;
+      expect((await runSort()).checks[0]).toMatchObject({ matches: false, sameItems: false });
+    } finally {
+      await new Promise<void>((resolve) => fixture.close(() => resolve()));
+    }
+  });
+
   it('compares a custom expectation independently from the rule', async () => {
     const response = await run([
       { id: 'without-city', expectedCities: ['kazan'] },
@@ -111,7 +162,7 @@ describe('SEARCH-01 over HTTP', () => {
     const snapshot = await (await run()).json();
     expect(store.publish(snapshot.id, 'other-owner', 'SEARCH-01').record).toBeUndefined();
     const record = await (await post(`${task}/runs/${snapshot.id}/publication`)).json();
-    expect(store.readRecord(record.id, 'other-owner', 'SEARCH-01')).toBeUndefined();
+    expect(store.readRecord(record.id, 'other-owner')).toBeUndefined();
   });
 
   it('rejects cross-origin mutations and accepts the browser origin', async () => {
@@ -155,6 +206,33 @@ describe('SEARCH-01 over HTTP', () => {
     expect(response.status).toBe(200);
     return response.json();
   };
+
+  it.each([
+    ['Цены 500 и 900 идут правильно, этого достаточно?', 'guidance', [1, 2], /500 ₽ → 900 ₽ → без цены/],
+    ['Две цены стоят по возрастанию. Значит, сортировка работает?', 'guidance', [1, 2], /весь порядок/],
+    ['Куда должно попасть объявление, если продавец не указал цену?', 'guidance', [2], /в конце/],
+    ['В ответе пришли все три, но первым стоит объявление без цены. Это ошибка?', 'guidance', [2], /расхождение/],
+    ['HTTP 200 означает, что порядок верный?', 'guidance', [3, 1, 2], /последовательность/],
+    ['Как проверять фильтр по Казани?', 'insufficient', [], /SORT-01/],
+    ['Как работает сортировка по дате?', 'insufficient', [], /SORT-01/],
+    ['Запиши, что проверка прошла', 'action', [], /Запустить проверку/],
+  ] as const)('answers SORT-01 question «%s» using its own rules', async (question, kind, rules, fragment) => {
+    const response = await post('/api/tasks/SORT-01/buddy', { question });
+    expect(response.status).toBe(200);
+    const answer = await response.json();
+    expect(answer).toMatchObject({ kind, mode: 'guide', sources: rules.map((ruleNumber) => ({ instructionId: 'sort-guide-v1', ruleNumber })) });
+    expect(answer.text).toMatch(fragment);
+  });
+
+  it('scopes clarification IDs to their task in both directions', async () => {
+    const city = await ask('В выдаче один город, это нормально?');
+    const sort = async (question: string, clarificationId?: string) => (await post('/api/tasks/SORT-01/buddy', { question, clarificationId })).json();
+    const first = await sort('Первое объявление в выдаче стоит правильно?');
+    expect(first).toMatchObject({ kind: 'clarification', text: expect.stringContaining('Есть ли цена'), clarificationId: expect.any(String), sources: [] });
+    expect(await sort('Нет', city.clarificationId)).toMatchObject({ kind: 'clarification', sources: [] });
+    expect(await ask('Нет', first.clarificationId)).toMatchObject({ kind: 'clarification', sources: [] });
+    expect(await sort('Нет', first.clarificationId)).toMatchObject({ kind: 'guidance', sources: [{ instructionId: 'sort-guide-v1', ruleNumber: 2 }] });
+  });
 
   it.each(buddyCases)('answers «$question» with the appropriate behavior and sources', async ({ question, kind, rules, fragments }) => {
     const answer = await ask(question);
@@ -241,6 +319,18 @@ describe('SEARCH-01 over HTTP', () => {
       expect(JSON.parse(received.body!).messages[0].content).toContain('Buddy спросил, был ли задан фильтр');
       expect(received.body).not.toContain(clarification.clarificationId);
       expect(await ask('Что делать?')).toMatchObject({ kind: 'clarification', mode: 'guide-fallback', sources: [] });
+
+      modelAvailable = true;
+      const sortQuestion = 'Куда поставить объявление без цены?';
+      content = '{"intent":"no-price"}';
+      const sortRequest = () => post('/api/tasks/SORT-01/buddy', { question: sortQuestion });
+      expect(await (await sortRequest()).json()).toMatchObject({ mode: 'model', sources: [{ instructionId: 'sort-guide-v1', ruleNumber: 2 }] });
+      content = '{"intent":"no-city"}';
+      const sortAnswer = await (await sortRequest()).json();
+      expect(sortAnswer).toMatchObject({ mode: 'guide-fallback', sources: [{ instructionId: 'sort-guide-v1', ruleNumber: 2 }] });
+      const sortContext = JSON.parse(received.body!).messages[0].content;
+      expect(sortContext).toContain('Задача SORT-01');
+      expect(sortContext).not.toContain('SEARCH-01');
 
       stallProvider = true;
       const timeout = AbortSignal.timeout.bind(AbortSignal);

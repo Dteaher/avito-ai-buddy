@@ -5,16 +5,28 @@ import heroImage from './assets/search-shapes.webp';
 import { errorMessage, post } from './api';
 import { Buddy, InstructionDialog } from './Buddy';
 import { Evidence, RunContext } from './Evidence';
+import { PriceOrderInput } from './PriceOrder';
 
 const stages = ['Разобраться', 'Подготовить', 'Проверить', 'Опубликовать'];
 type Choices = Partial<Record<CheckId, City[]>>;
 
+export function NextTask() {
+  return (
+    <aside className="next-task">
+      <div><strong>Следующая задача · SORT-01</strong><p>Задай ожидаемый порядок объявлений по инструкции команды. Buddy поможет, если возникнет вопрос.</p></div>
+      <a className="button secondary" href="/?task=SORT-01">Продолжить самостоятельно <ArrowRight size={18} /></a>
+    </aside>
+  );
+}
+
 export function Workspace({ data }: { data: WorkspaceData }) {
-  const { task, checks } = data;
+  const { task } = data;
+  const priceTask = data.kind === 'price-order';
   const taskPath = `/api/tasks/${task.id}`;
   const [stage, setStage] = useState(0);
   const [furthest, setFurthest] = useState(0);
   const [choices, setChoices] = useState<Choices>({});
+  const [order, setOrder] = useState<string[]>([]);
   const [run, setRun] = useState<Run>();
   const [publication, setPublication] = useState<Publication>();
   const [busy, setBusy] = useState(false);
@@ -23,7 +35,7 @@ export function Workspace({ data }: { data: WorkspaceData }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const heading = useRef<HTMLHeadingElement>(null);
   const shouldFocus = useRef(false);
-  const actionReady = checks.every(({ id }) => choices[id] !== undefined);
+  const actionReady = priceTask ? order.length === data.orderItems.length : data.checks.every(({ id }) => choices[id] !== undefined);
 
   useEffect(() => {
     if (shouldFocus.current) heading.current?.focus();
@@ -37,10 +49,7 @@ export function Workspace({ data }: { data: WorkspaceData }) {
     setFurthest((previous) => Math.max(previous, next));
   }
 
-  function select(id: CheckId, city?: City) {
-    const current = choices[id] ?? [];
-    const selected = city ? (current.includes(city) ? current.filter((item) => item !== city) : [...current, city]) : [];
-    setChoices({ ...choices, [id]: city && !selected.length ? undefined : selected });
+  function clearResult() {
     setFailure('');
     if (run) {
       setRun(undefined);
@@ -49,13 +58,21 @@ export function Workspace({ data }: { data: WorkspaceData }) {
     }
   }
 
+  function select(id: CheckId, city?: City) {
+    const current = choices[id] ?? [];
+    const selected = city ? (current.includes(city) ? current.filter((item) => item !== city) : [...current, city]) : [];
+    setChoices({ ...choices, [id]: city && !selected.length ? undefined : selected });
+    clearResult();
+  }
+
   async function launch() {
     if (busy || !actionReady) return;
     setBusy(true);
     setFailure('');
     try {
       const result = await post<Run>(`${taskPath}/runs`, {
-        checks: checks.map(({ id }) => ({ id, expectedCities: choices[id] })),
+        checks: priceTask ? [{ id: data.checks[0].id, expectedOrder: order }]
+          : data.checks.map(({ id }) => ({ id, expectedCities: choices[id] })),
       });
       setRun(result);
       setPublication(undefined);
@@ -100,6 +117,13 @@ export function Workspace({ data }: { data: WorkspaceData }) {
         <img className="hero-image" src={heroImage} alt="" width="900" height="302" />
       </section>
 
+      <nav className="task-nav" aria-label="Рабочие задачи">
+        {data.tasks.map(({ id }) => (
+          <a key={id} href={id === 'SEARCH-01' ? '/' : `/?task=${encodeURIComponent(id)}`} aria-current={id === task.id ? 'page' : undefined}>
+            {id === 'SEARCH-01' ? 'Фильтр по городу' : 'Сортировка по цене'}
+          </a>
+        ))}
+      </nav>
       <nav className="steps" aria-label="Этапы проверки">
         <ol>{stages.map((label, index) => {
           const current = index === stage;
@@ -120,10 +144,10 @@ export function Workspace({ data }: { data: WorkspaceData }) {
             <>
               <div className="panel-heading"><h2 id="stage-title" tabIndex={-1} ref={heading}>Разобраться в задаче</h2></div>
               <p className="stage-intro">{task.description}</p>
-              <div className="brief">
+              {!priceTask && <div className="brief">
                 <span className="brief-icon"><ListChecks size={22} /></span>
                 <div><h3>Что считаем правильным</h3><p>{task.criterion}</p></div>
-              </div>
+              </div>}
               <button type="button" className="text-link instruction-link" onClick={() => openSource()}><BookOpen size={18} /> Тестовая инструкция команды <ArrowUpRight size={15} /></button>
               <div className="actions"><button type="button" className="button primary" onClick={() => move(1)}>Подготовить проверку <ArrowRight size={19} /></button></div>
             </>
@@ -131,8 +155,11 @@ export function Workspace({ data }: { data: WorkspaceData }) {
           {stage === 1 && (
             <>
               <div className="panel-heading"><h2 id="stage-title" tabIndex={-1} ref={heading}>Подготовить проверку</h2></div>
-              <p className="stage-intro">Выбери, какие города должны вернуться в каждом запросе.</p>
-              {checks.map((check, index) => {
+              <p className="stage-intro">{priceTask ? 'Задай ожидаемую последовательность по тестовой инструкции.' : 'Выбери, какие города должны вернуться в каждом запросе.'}</p>
+              {priceTask ? <PriceOrderInput check={data.checks[0]} items={data.orderItems} order={order} disabled={busy} onChange={(next) => {
+                setOrder(next);
+                clearResult();
+              }} /> : data.checks.map((check, index) => {
                 const selected = choices[check.id];
                 return (
                   <fieldset className="expectation" key={check.id} disabled={busy}>
@@ -192,6 +219,7 @@ export function Workspace({ data }: { data: WorkspaceData }) {
                 )}
                 <button type="button" className="button secondary" disabled={busy} onClick={() => move(2)}><ArrowLeft size={17} /> К результату</button>
               </div>
+              {publication && !priceTask && <NextTask />}
             </>
           )}
         </section>

@@ -4,6 +4,7 @@ import type { BuddyAnswer, BuddyQuestion, Instruction, Publication, Workspace } 
 import { errorMessage, post } from './api';
 
 const suggestions = ['Ответа 200 достаточно?', 'Как проверить поиск без города?', 'Что вернёт фильтр по Казани?'];
+const priceSuggestions = ['Достаточно, что 500 и 900 идут по порядку?', 'Куда поставить объявление без цены?'];
 
 interface Props {
   workspace: Workspace;
@@ -61,9 +62,11 @@ export function Buddy({ workspace, openSource, publication }: Props) {
       <div className="chat-log" ref={log} role="log" aria-label="Диалог с Buddy">
         {!messages.length && (
           <div className="welcome">
-            <p className="bubble assistant">Помогу разобраться в задаче и сверить ожидания с правилами команды. С чего начнём?</p>
+            <p className="bubble assistant">{workspace.kind === 'price-order'
+              ? 'Попробуй задать порядок по инструкции. Если сомневаешься, спроси меня.'
+              : 'Помогу разобраться в задаче и сверить ожидания с правилами команды. С чего начнём?'}</p>
             <div className="suggestions">
-              {suggestions.map((question) => (
+              {(workspace.kind === 'price-order' ? priceSuggestions : suggestions).map((question) => (
                 <button key={question} type="button" onClick={() => void ask(question)}>{question}<ArrowUpRight size={15} /></button>
               ))}
             </div>

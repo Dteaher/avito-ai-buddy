@@ -18,18 +18,30 @@ export interface Task {
   instruction: Instruction;
 }
 
-export interface Check {
-  id: CheckId;
+interface RequestDefinition {
   label: string;
   path: string;
   parameter: string;
 }
 
-export interface Workspace {
+export interface Check extends RequestDefinition {
+  id: CheckId;
+}
+
+export interface PriceCheck extends RequestDefinition {
+  id: 'price-asc';
+}
+
+interface WorkspaceBase {
   task: Task;
-  checks: Check[];
+  tasks: Task[];
   buddyMode: 'guide' | 'model';
 }
+
+export type Workspace = WorkspaceBase & (
+  | { kind?: never; checks: Check[] }
+  | { kind: 'price-order'; checks: [PriceCheck]; orderItems: PriceListing[] }
+);
 
 export interface CheckInput {
   id: CheckId;
@@ -42,24 +54,45 @@ export interface Listing {
   city: City;
 }
 
-export interface CheckResult extends Check, CheckInput {
+export interface PriceListing {
+  id: string;
+  title: string;
+  price: number | null;
+}
+
+interface ResponseSnapshot {
   status: number;
-  items: Listing[];
   rawBody: string;
-  actualCities: City[];
-  ruleCities: City[];
-  missing: City[];
-  extra: City[];
   matches: boolean;
   followsRule: boolean;
 }
 
-export interface Run {
+export interface CheckResult extends Check, CheckInput, ResponseSnapshot {
+  items: Listing[];
+  actualCities: City[];
+  ruleCities: City[];
+  missing: City[];
+  extra: City[];
+}
+
+export interface PriceResult extends PriceCheck, ResponseSnapshot {
+  items: PriceListing[];
+  fixtures: PriceListing[];
+  expectedOrder: string[];
+  actualOrder: string[];
+  ruleOrder: string[];
+  sameItems: boolean;
+}
+
+interface RunBase {
   id: string;
   task: Task;
   checkedAt: string;
-  checks: CheckResult[];
 }
+
+export type CityRun = RunBase & { kind?: never; checks: CheckResult[] };
+export type PriceRun = RunBase & { kind: 'price-order'; checks: [PriceResult] };
+export type Run = CityRun | PriceRun;
 
 export interface Publication {
   id: string;

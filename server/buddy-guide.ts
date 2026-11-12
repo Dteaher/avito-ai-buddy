@@ -1,11 +1,11 @@
 import type { BuddyAnswer } from '../shared/contracts.ts';
 import { checks, task } from './scenario.ts';
 
-interface Reply {
+export interface Reply {
   kind: BuddyAnswer['kind'];
   text: string;
   rules: number[];
-  clarifyFilter?: boolean;
+  followUp?: boolean;
 }
 
 const [noCityRule, kazanRule, statusRule] = task.instruction.rules;
@@ -23,11 +23,11 @@ export const replies = {
     text: `Контрольный запрос ${control} проверяет, что фильтр оставляет только Казань. Основной ${main} проверяет, что без фильтра в выдаче есть Казань и Самара. Укажи ожидания для обоих запросов и сравни ответы.`,
   },
   'ask-filter': {
-    kind: 'clarification', rules: [], clarifyFilter: true,
+    kind: 'clarification', rules: [], followUp: true,
     text: 'Был ли задан фильтр по городу? Уточни, это был запрос без города или с параметром city=kazan.',
   },
   'ask-city': {
-    kind: 'clarification', rules: [], clarifyFilter: true,
+    kind: 'clarification', rules: [], followUp: true,
     text: 'Уточни, был ли это фильтр по Казани. Для другого города в SEARCH-01 нет контрольного запроса.',
   },
   clarify: {
@@ -53,10 +53,11 @@ const withoutFilter = [
   /не (?:выбирал[аи]?|выбрал[аи]?|указал[аи]?|задавал[аи]?|передавал[аи]?) (?:город|city|фильтр)/,
 ];
 
-export function guideIntent(question: string, waitingForFilter: boolean): BuddyIntent {
-  const query = question.toLowerCase().replaceAll('ё', 'е').replace(/\s+/g, ' ');
-  if (/опубликуй|опубликовать|подтверд(?:и|ить) публикац|запусти|выполни (?:проверку|запрос)|сделай прогон|отправь.*(?:задач|трекер)/.test(query)) return 'action';
+export function isActionRequest(query: string) {
+  return /опубликуй|опубликовать|подтверд(?:и|ить) публикац|запусти|выполни (?:проверку|запрос)|сделай прогон|(?:отправь|запиши).*(?:задач|трекер|проверк|прогон)/.test(query);
+}
 
+export function guideIntent(query: string, waitingForFilter: boolean): BuddyIntent {
   const noCity = withoutFilter.some((pattern) => pattern.test(query));
   const mentionsKazan = /казан|kazan|контрольн/.test(query);
   const kazan = mentionsKazan && /city\s*=\s*kazan|контрольн|фильтр|поиск по казани|выбрал|указал|передал/.test(query);
@@ -79,13 +80,4 @@ export function guideIntent(question: string, waitingForFilter: boolean): BuddyI
 
   if (/^(?:что (?:делать|проверить|дальше)|как проверить|подскажи|помоги|не понимаю|да|нет)[.!? ]*$/.test(query)) return 'clarify';
   return 'insufficient';
-}
-
-export function buildAnswer(intent: BuddyIntent, mode: BuddyAnswer['mode'], issueClarification: () => string): BuddyAnswer {
-  const { kind, text, rules, clarifyFilter }: Reply = replies[intent];
-  const instruction = task.instruction;
-  const sources = rules.map((ruleNumber) => ({ instructionId: instruction.id, ruleNumber }));
-  const answer: BuddyAnswer = { kind, text, mode, sources };
-  if (clarifyFilter) answer.clarificationId = issueClarification();
-  return answer;
 }

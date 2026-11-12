@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { cities, type Check, type CheckInput, type CheckResult, type City, type Listing, type Run, type Task } from '../shared/contracts.ts';
+import { cities, type Check, type CheckInput, type CheckResult, type City, type CityRun, type Listing, type Task } from '../shared/contracts.ts';
 
 export const trainee = 'demo-trainee';
 
@@ -63,30 +63,35 @@ const ruleCities = {
   kazan: ['kazan'],
 } satisfies Record<CheckInput['id'], City[]>;
 
-async function checkResponse(origin: string, input: CheckInput, signal: AbortSignal): Promise<CheckResult> {
-  const check = checks.find(({ id }) => id === input.id)!;
-  const response = await fetch(new URL(check.path, origin), { signal, redirect: 'error' });
+export async function fetchStand(origin: string, path: string, signal: AbortSignal) {
+  const response = await fetch(new URL(path, origin), { signal, redirect: 'error' });
   const rawBody = await response.text();
   if (!response.ok) throw new Error(`Stand returned ${response.status}`);
   const data: unknown = JSON.parse(rawBody);
-  if (!isObject(data) || !Array.isArray(data.items) || !data.items.every(isListing)) {
+  if (!isObject(data) || !Array.isArray(data.items)) {
     throw new Error('Invalid stand response');
   }
+  const items: unknown[] = data.items;
+  return { items, rawBody, status: response.status };
+}
 
-  const { items } = data;
+async function checkResponse(origin: string, input: CheckInput, signal: AbortSignal): Promise<CheckResult> {
+  const check = checks.find(({ id }) => id === input.id)!;
+  const { items, rawBody, status } = await fetchStand(origin, check.path, signal);
+  if (!items.every(isListing)) throw new Error('Invalid city listings');
   const actualCities = [...new Set(items.map(({ city }) => city))];
   const expectedCities = [...input.expectedCities];
   const required: City[] = ruleCities[input.id];
   const missing = expectedCities.filter((city) => !actualCities.includes(city));
   const extra = actualCities.filter((city) => !expectedCities.includes(city));
   return {
-    ...check, expectedCities, status: response.status, items, rawBody, actualCities,
+    ...check, expectedCities, status, items, rawBody, actualCities,
     ruleCities: required, missing, extra, matches: missing.length + extra.length === 0,
     followsRule: expectedCities.length === required.length && required.every((city) => expectedCities.includes(city)),
   };
 }
 
-export async function executeRun(origin: string, inputs: CheckInput[]): Promise<Run> {
+export async function executeRun(origin: string, inputs: CheckInput[]): Promise<CityRun> {
   const signal = AbortSignal.timeout(5000);
   const results = await Promise.all(inputs.map((input) => checkResponse(origin, input, signal)));
   return { id: randomUUID(), task, checks: results, checkedAt: new Date().toISOString() };

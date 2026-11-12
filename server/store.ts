@@ -33,7 +33,7 @@ export function createStore(path: string) {
   `);
   const byId = db.prepare(`
     SELECT records.id, published_at, snapshot FROM records JOIN runs ON runs.id = run_id
-    WHERE records.id = ? AND owner = ? AND task_id = ?
+    WHERE records.id = ? AND owner = ?
   `);
 
   function read(row: ReturnType<typeof byId.get>): Publication | undefined {
@@ -52,8 +52,8 @@ export function createStore(path: string) {
       const record = read(byRun.get(runId, owner, taskId));
       return { record, created: changes === 1 };
     },
-    readRecord(id: string, owner: string, taskId: string) {
-      return read(byId.get(id, owner, taskId));
+    readRecord(id: string, owner: string) {
+      return read(byId.get(id, owner));
     },
     close() { db.close(); },
   };
