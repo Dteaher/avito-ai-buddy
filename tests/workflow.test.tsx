@@ -3,6 +3,7 @@ import { cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../src/App';
+import { PriceComparison } from '../src/PriceOrder';
 import { checks, listings, task } from '../server/scenario.ts';
 import { priceCheck, priceItems, sortTask } from '../server/price-scenario.ts';
 import type { BuddyAnswer, BuddyQuestion, CheckResult, CityRun, Publication, Run, Workspace } from '../shared/contracts.ts';
@@ -66,6 +67,17 @@ async function prepare(user: ReturnType<typeof userEvent.setup>) {
 }
 
 describe('First Check workspace', () => {
+  it('connects the positions of a priced listing when the no-price listing stays put', () => {
+    const items = [priceItems[0], priceItems[2], priceItems[1]];
+    const expectedOrder = ['ad-201', 'ad-202', 'ad-203'];
+    render(<PriceComparison check={{
+      ...priceCheck, expectedOrder, actualOrder: items.map(({ id }) => id), ruleOrder: expectedOrder,
+      fixtures: priceItems, items, rawBody: '', status: 200, sameItems: true, matches: false, followsRule: true,
+    }} />);
+    expect(screen.getByText('Книжная полка на 1-м месте вместо 2-го.')).toBeTruthy();
+    expect(screen.getAllByText('Книжная полка', { selector: '.moved span' })).toHaveLength(2);
+  });
+
   it('captures a learner-defined price order and explains which item moved', async () => {
     window.history.replaceState(null, '', '/?task=SORT-01');
     const expectedOrder = ['ad-201', 'ad-202', 'ad-203'];
@@ -126,6 +138,8 @@ describe('First Check workspace', () => {
     const confirm = screen.getByRole('button', { name: 'Подтвердить публикацию' });
     await user.click(confirm);
     await screen.findByText('Сбой трекера');
+    expect(screen.getByText('Самара отсутствует').closest('details')).toBeNull();
+    expect(confirm.textContent).toContain('Повторить публикацию');
     await user.click(confirm);
     await screen.findByRole('link', { name: 'Открыть запись QA-demo' });
     expect(mock.mock.calls.filter(([url]) => url.endsWith('/runs'))).toHaveLength(2);

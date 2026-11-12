@@ -1,4 +1,5 @@
-import { CircleAlert, Undo2 } from 'lucide-react';
+import { useLayoutEffect, useRef } from 'react';
+import { Check, CircleAlert, Undo2 } from 'lucide-react';
 import type { PriceCheck, PriceListing, PriceResult } from '../shared/contracts';
 
 export function priceLabel(price: number | null) {
@@ -56,22 +57,45 @@ function OrderColumn({ title, order, items, highlight = -1 }: { title: string; o
   );
 }
 
-export function PriceComparison({ check }: { check: PriceResult }) {
-  const noPrice = check.fixtures.find(({ price }) => price === null);
-  const expectedPosition = noPrice ? check.expectedOrder.indexOf(noPrice.id) : -1;
-  const actualPosition = noPrice ? check.actualOrder.indexOf(noPrice.id) : -1;
-  const moved = expectedPosition >= 0 && actualPosition >= 0 && expectedPosition !== actualPosition;
+export function PriceComparison({ check, animate = false }: { check: PriceResult; animate?: boolean }) {
+  const comparison = useRef<HTMLDivElement>(null);
+  const connector = useRef<HTMLSpanElement>(null);
+  const moves = check.actualOrder.flatMap((id, actual) => {
+    const expected = check.expectedOrder.indexOf(id);
+    const item = check.fixtures.find((fixture) => fixture.id === id);
+    return item && expected !== -1 && expected !== actual ? [{ item, expected, actual }] : [];
+  });
+  const moved = moves.find(({ item }) => item.price === null) ?? moves[0];
   const verdict = check.matches ? 'Порядок совпал с ожиданием.' : check.sameItems ? 'Состав совпал. Порядок отличается.' : 'Состав выдачи отличается.';
+
+  useLayoutEffect(() => {
+    const columns = comparison.current;
+    const marker = connector.current;
+    if (!animate || !columns || !marker) return;
+    const [from, to] = columns.querySelectorAll('.moved');
+    if (!from || !to) return;
+    const top = columns.getBoundingClientRect().top;
+    function center(row: Element) {
+      const rect = row.getBoundingClientRect();
+      return `${rect.top - top + rect.height / 2}px`;
+    }
+    marker.style.setProperty('--from-y', center(from));
+    marker.style.setProperty('--to-y', center(to));
+  }, [animate, moved?.expected, moved?.actual]);
 
   return (
     <>
       <div className={`order-verdict ${check.matches ? 'ok' : 'bad'}`}>
-        <strong>{verdict}</strong>
-        {moved && <p>Объявление без цены на {actualPosition + 1}-м месте вместо {expectedPosition + 1}-го.</p>}
+        {check.matches ? <Check size={20} /> : <CircleAlert size={20} />}
+        <div>
+          <strong>{verdict}</strong>
+          {moved && <p>{moved.item.price === null ? 'Объявление без цены' : moved.item.title} на {moved.actual + 1}-м месте вместо {moved.expected + 1}-го.</p>}
+        </div>
       </div>
-      <div className="order-comparison">
-        <OrderColumn title="Ожидали" order={check.expectedOrder} items={check.fixtures} />
-        <OrderColumn title="Стенд вернул" order={check.actualOrder} items={check.items} highlight={moved ? actualPosition : -1} />
+      <div className="order-comparison" ref={comparison}>
+        <OrderColumn title="Ожидали" order={check.expectedOrder} items={check.fixtures} highlight={moved?.expected} />
+        <OrderColumn title="Стенд вернул" order={check.actualOrder} items={check.items} highlight={moved?.actual} />
+        {animate && moved && <span className="order-connector" ref={connector} aria-hidden="true" />}
       </div>
       {!check.followsRule && <p className="rule-warning"><CircleAlert size={18} /> По инструкции сначала идут числовые цены по возрастанию, затем объявление без цены.</p>}
     </>

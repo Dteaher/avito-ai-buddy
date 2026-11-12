@@ -16,10 +16,7 @@ function Header() {
           <span className="brand-mark" aria-hidden="true"><i /><i /><i /><i /></span>
           AI-buddy
         </a>
-        <div className="masthead-meta">
-          <span className="environment"><i />Тестовый стенд</span>
-          <span className="avatar" aria-label="Демо-стажёр" title="Демо-стажёр">ДС</span>
-        </div>
+        <span className="environment"><i />Тестовый стенд</span>
       </div>
     </header>
   );

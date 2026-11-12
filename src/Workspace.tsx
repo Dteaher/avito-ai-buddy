@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
-import { ArrowLeft, ArrowRight, ArrowUpRight, BookOpen, Check, CircleAlert, CircleCheck, ListChecks, LoaderCircle, Terminal } from 'lucide-react';
+import { useEffect, useRef, useState, type CSSProperties } from 'react';
+import { ArrowLeft, ArrowRight, ArrowUpRight, BookOpen, Check, ChevronDown, CircleAlert, ListChecks, LoaderCircle } from 'lucide-react';
 import { cities, type CheckId, type City, type Publication, type Run, type Workspace as WorkspaceData } from '../shared/contracts';
 import heroImage from './assets/search-shapes.webp';
 import { errorMessage, post } from './api';
@@ -34,15 +34,23 @@ export function Workspace({ data }: { data: WorkspaceData }) {
   const [animateResult, setAnimateResult] = useState(false);
   const dialog = useRef<HTMLDialogElement>(null);
   const heading = useRef<HTMLHeadingElement>(null);
+  const recordLink = useRef<HTMLAnchorElement>(null);
   const shouldFocus = useRef(false);
   const actionReady = priceTask ? order.length === data.orderItems.length : data.checks.every(({ id }) => choices[id] !== undefined);
 
   useEffect(() => {
-    if (shouldFocus.current) heading.current?.focus();
-  }, [stage, publication]);
+    if (shouldFocus.current) {
+      shouldFocus.current = false;
+      heading.current?.focus();
+    }
+  }, [stage]);
+
+  useEffect(() => {
+    if (publication && document.activeElement === document.body) recordLink.current?.focus({ preventScroll: true });
+  }, [publication]);
 
   function move(next: number) {
-    shouldFocus.current = true;
+    shouldFocus.current = next !== stage;
     setFailure('');
     setAnimateResult(false);
     setStage(next);
@@ -105,7 +113,7 @@ export function Workspace({ data }: { data: WorkspaceData }) {
     <main className="container workspace">
       <section className="hero" aria-labelledby="page-title">
         <div className="hero-copy">
-          <span className="task-key"><Terminal size={15} />{task.id}</span>
+          <span className="task-key">{task.id}</span>
           <h1 id="page-title">Первая проверка</h1>
           <p>{task.title}</p>
         </div>
@@ -120,12 +128,13 @@ export function Workspace({ data }: { data: WorkspaceData }) {
         ))}
       </nav>
       <nav className="steps" aria-label="Этапы проверки">
-        <ol>{stages.map((label, index) => {
+        <ol style={{ '--stage-offset': `${stage * 100}%` } as CSSProperties}>{stages.map((label, index) => {
           const current = index === stage;
           const done = index < furthest || Boolean(publication);
           return (
-            <li key={label} className={current ? 'active' : done ? 'done' : ''}>
-              <button type="button" disabled={busy || index > furthest} aria-current={current ? 'step' : undefined} onClick={() => move(index)}>
+            <li key={label} className={done ? 'done' : undefined}>
+              <button type="button" disabled={busy || index > furthest} aria-current={current ? 'step' : undefined}
+                aria-description={done ? 'Этап завершён' : undefined} onClick={() => move(index)}>
                 <span className="step-count" aria-hidden="true">{done ? <Check size={15} /> : index + 1}</span><span>{label}</span>
               </button>
             </li>
@@ -134,10 +143,14 @@ export function Workspace({ data }: { data: WorkspaceData }) {
       </nav>
 
       <div className="workspace-grid">
-        <section className="surface work-panel" aria-labelledby="stage-title" aria-busy={busy}>
+        <Buddy workspace={data} openSource={openSource} run={run} collapsible />
+        <section className="surface work-panel" aria-labelledby="stage-title">
+          <span className="visually-hidden" aria-live="polite">
+            {busy ? (stage === 1 ? 'Запускаем проверку…' : 'Публикуем…') : publication ? 'Опубликовано' : ''}
+          </span>
           {stage === 0 && (
             <>
-              <div className="panel-heading"><h2 id="stage-title" tabIndex={-1} ref={heading}>Разобраться в задаче</h2></div>
+              <div className="panel-heading"><h2 id="stage-title" tabIndex={-1} ref={heading}>Что проверяем</h2></div>
               <p className="stage-intro">{task.description}</p>
               {!priceTask && <div className="brief">
                 <span className="brief-icon"><ListChecks size={22} /></span>
@@ -172,53 +185,53 @@ export function Workspace({ data }: { data: WorkspaceData }) {
               })}
               {failure && <p className="action-error" role="alert"><CircleAlert size={19} />{failure}</p>}
               <div className="actions">
-                <button type="button" className="button primary" disabled={busy || !actionReady} onClick={() => void launch()}>
-                  {busy ? 'Запускаем проверку…' : 'Запустить проверку'} {busy ? <LoaderCircle size={18} className="spinner" /> : <ArrowRight size={19} />}
+                <button type="button" className="button primary run-action" disabled={!actionReady} aria-disabled={busy || undefined} onClick={() => void launch()}>
+                  {busy ? 'Запускаем проверку…' : failure ? 'Повторить проверку' : 'Запустить проверку'}
+                  {busy ? <LoaderCircle size={18} className="spinner" /> : <ArrowRight size={19} />}
                 </button>
               </div>
             </>
           )}
-          {stage === 2 && run && (
+          {stage >= 2 && run && (
             <>
-              <div className="panel-heading"><h2 id="stage-title" tabIndex={-1} ref={heading}>Результат проверки</h2></div>
+              <div className="panel-heading">
+                <h2 id="stage-title" tabIndex={-1} ref={heading}>{stage === 2 || publication ? 'Результат проверки' : 'Предпросмотр'}</h2>
+              </div>
               <Evidence key={run.id} run={run} animate={animateResult} />
-              <div className="actions">
-                <button type="button" className="button primary" onClick={() => move(3)}>
-                  {publication ? 'Открыть публикацию' : 'Опубликовать в задачу'} <ArrowRight size={19} />
-                </button>
-                <button type="button" className="button secondary" onClick={() => move(1)}>Изменить ожидания</button>
-              </div>
-            </>
-          )}
-          {stage === 3 && run && (
-            <>
-              <div className="panel-heading"><h2 id="stage-title" tabIndex={-1} ref={heading}>{publication ? 'Результат опубликован' : 'Предпросмотр записи'}</h2></div>
-              {publication ? (
-                <div className="published" role="status">
-                  <CircleCheck size={24} />
-                  <div><strong>Запись добавлена в задачу {task.id}</strong><p>Её можно открыть в тестовом трекере по постоянной ссылке.</p></div>
-                </div>
-              ) : <p className="stage-intro">Проверь, какие данные будут сохранены в тестовом трекере задачи {task.id}.</p>}
-              <RunContext run={run} />
-              {!publication && <details className="preview-evidence"><summary>Ожидания и ответы стенда</summary><Evidence run={run} /></details>}
+              {stage === 3 && <details className="response-details">
+                <summary>Данные записи для трекера · {task.id} <ChevronDown size={17} className="disclosure" /></summary>
+                <RunContext run={run} />
+              </details>}
               {failure && <p className="action-error" role="alert"><CircleAlert size={19} />{failure}</p>}
-              <div className="actions">
-                {publication ? (
-                  <a className="button primary publication-link" href={publication.url} aria-label={`Открыть запись ${publication.id}`}>
-                    <span>Открыть запись <small>{publication.id}</small></span><ArrowUpRight size={19} />
-                  </a>
+              <div className="actions" key={stage}>
+                {stage === 2 ? (
+                  <>
+                    <button type="button" className="button primary" onClick={() => move(3)}>
+                      {publication ? 'Открыть публикацию' : 'Опубликовать в задачу'} <ArrowRight size={19} />
+                    </button>
+                    <button type="button" className="button secondary" onClick={() => move(1)}>Изменить ожидания</button>
+                  </>
                 ) : (
-                  <button type="button" className="button primary" disabled={busy} onClick={() => void publish()}>
-                    {busy ? 'Публикуем…' : 'Подтвердить публикацию'} {busy ? <LoaderCircle size={18} className="spinner" /> : <ArrowRight size={19} />}
-                  </button>
+                  <>
+                    {publication ? (
+                      <a ref={recordLink} className="button primary publish-action publication-link" href={publication.url}
+                        aria-label={`Открыть запись ${publication.id}`} aria-describedby="published-status">
+                        <Check size={19} /><span><span id="published-status">Опубликовано</span><small>Открыть запись</small></span><ArrowUpRight size={19} />
+                      </a>
+                    ) : (
+                      <button type="button" className="button primary publish-action" aria-disabled={busy || undefined} onClick={() => void publish()}>
+                        {busy ? 'Публикуем…' : failure ? 'Повторить публикацию' : 'Подтвердить публикацию'}
+                        {busy ? <LoaderCircle size={18} className="spinner" /> : <ArrowRight size={19} />}
+                      </button>
+                    )}
+                    <button type="button" className="button secondary" disabled={busy} onClick={() => move(2)}><ArrowLeft size={17} /> К результату</button>
+                  </>
                 )}
-                <button type="button" className="button secondary" disabled={busy} onClick={() => move(2)}><ArrowLeft size={17} /> К результату</button>
               </div>
-              {publication && !priceTask && <NextTask />}
+              {stage === 3 && publication && !priceTask && <NextTask />}
             </>
           )}
         </section>
-        <Buddy workspace={data} openSource={openSource} publication={publication} run={run} />
       </div>
       <InstructionDialog instruction={task.instruction} dialog={dialog} />
     </main>

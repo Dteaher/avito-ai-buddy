@@ -1,5 +1,5 @@
-import { ArrowRight, Check, ChevronDown, CircleAlert, Clock3, Terminal, X } from 'lucide-react';
-import { cities, type CheckResult, type City, type PriceResult, type Run, type RunEvidenceSource } from '../shared/contracts';
+import { Check, ChevronDown, CircleAlert, Clock3, Terminal, X } from 'lucide-react';
+import { cities, type CheckResult, type PriceResult, type Run, type RunEvidenceSource } from '../shared/contracts';
 import { PriceComparison, priceLabel } from './PriceOrder';
 
 type ResponseCheck = CheckResult | PriceResult;
@@ -12,34 +12,31 @@ function RequestLine({ check }: { check: ResponseCheck }) {
   return <span className="endpoint"><span>GET</span><code>{check.path}</code></span>;
 }
 
-function CityColumn({ name, list, missing = [], extra = [] }: { name: string; list: City[]; missing?: City[]; extra?: City[] }) {
-  return (
-    <div className="city-column">
-      <h4>{name}</h4>
-      <ul>
-        {!list.length && <li className="city-row neutral">Пустая выдача</li>}
-        {list.map((city) => (
-          <li key={city} className={`city-row ${extra.includes(city) ? 'bad' : 'ok'}`}>
-            {extra.includes(city) ? <CircleAlert size={19} /> : <Check size={19} />}
-            <span>{cities[city]}{extra.includes(city) && ' — лишний город'}</span>
-          </li>
-        ))}
-        {missing.map((city) => (
-          <li key={city} className="city-row bad missing"><CircleAlert size={19} /><span>{cities[city]} отсутствует</span></li>
-        ))}
-      </ul>
-    </div>
-  );
-}
-
 function Comparison({ check }: { check: CheckResult }) {
+  const comparedCities = [...new Set([...check.expectedCities, ...check.actualCities])];
   return (
     <>
-      <div className="city-comparison">
-        <CityColumn name="Ожидали" list={check.expectedCities} />
-        <ArrowRight className="comparison-arrow" size={20} aria-hidden="true" />
-        <CityColumn name="Стенд вернул" list={check.actualCities} missing={check.missing} extra={check.extra} />
-      </div>
+      <table className="city-comparison" aria-label="Сравнение городов">
+        <thead><tr><th scope="col">Ожидали</th><th scope="col">Стенд вернул</th></tr></thead>
+        <tbody>
+          {!comparedCities.length && <tr><td>Пустая выдача</td><td>Пустая выдача</td></tr>}
+          {comparedCities.map((city) => {
+            const missing = check.missing.includes(city);
+            const extra = check.extra.includes(city);
+            return (
+              <tr key={city}>
+                <td>{extra ? '—' : cities[city]}</td>
+                <td className={missing || extra ? 'city-mismatch' : 'city-match'}>
+                  <div className="city-value">
+                    {missing || extra ? <CircleAlert size={18} /> : <Check size={18} />}
+                    <span>{cities[city]}{missing ? ' отсутствует' : extra ? ' — лишний город' : ''}</span>
+                  </div>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
       <div className={`comparison-verdict ${check.matches ? 'ok' : 'bad'}`}>
         {check.matches ? <Check size={20} /> : <CircleAlert size={20} />}
         <strong>{check.matches ? 'Совпало' : 'Найдено расхождение'}</strong>
@@ -68,7 +65,7 @@ function ResponseBody({ check }: { check: ResponseCheck }) {
 function ResponseDetails({ check }: { check: ResponseCheck }) {
   return (
     <details className="response-details">
-      <summary><Terminal size={16} /> Ответ стенда · HTTP {check.status} <ChevronDown size={17} className="disclosure" /></summary>
+      <summary><Terminal size={16} /> Подробности ответа <ChevronDown size={17} className="disclosure" /></summary>
       <ResponseBody check={check} />
     </details>
   );
@@ -90,7 +87,7 @@ export function Evidence({ run, animate = false, checkId }: { run: Run; animate?
     return (
       <section className={`evidence${animate ? ' reveal' : ''}`} aria-label="Основной запрос">
         <div className="request-heading"><RequestLine check={check} /><span className="http-status">HTTP {check.status}</span></div>
-        <PriceComparison check={check} />
+        <PriceComparison check={check} animate={animate} />
         <ResponseDetails check={check} />
       </section>
     );
