@@ -22,6 +22,7 @@ export function createStore(path: string) {
   `);
 
   const insertRun = db.prepare('INSERT INTO runs (id, owner, task_id, snapshot) VALUES (?, ?, ?, ?)');
+  const runById = db.prepare('SELECT snapshot FROM runs WHERE id = ? AND owner = ? AND task_id = ?');
   const insertRecord = db.prepare(`
     INSERT INTO records (id, run_id, published_at)
     SELECT ?, id, ? FROM runs WHERE id = ? AND owner = ? AND task_id = ?
@@ -45,6 +46,10 @@ export function createStore(path: string) {
   return {
     saveRun(run: Run, owner: string) {
       insertRun.run(run.id, owner, run.task.id, JSON.stringify(run));
+    },
+    readRun(id: string, owner: string, taskId: string): Run | undefined {
+      const row = runById.get(id, owner, taskId);
+      return row ? JSON.parse(String(row.snapshot)) as Run : undefined;
     },
     publish(runId: string, owner: string, taskId: string) {
       const id = `QA-${randomUUID()}`;

@@ -5,7 +5,7 @@ export interface Reply {
   kind: BuddyAnswer['kind'];
   text: string;
   rules: number[];
-  followUp?: boolean;
+  followUp?: 'filter' | 'kazan' | 'price';
 }
 
 const [noCityRule, kazanRule, statusRule] = task.instruction.rules;
@@ -23,11 +23,11 @@ export const replies = {
     text: `Контрольный запрос ${control} проверяет, что фильтр оставляет только Казань. Основной ${main} проверяет, что без фильтра в выдаче есть Казань и Самара. Укажи ожидания для обоих запросов и сравни ответы.`,
   },
   'ask-filter': {
-    kind: 'clarification', rules: [], followUp: true,
+    kind: 'clarification', rules: [], followUp: 'filter',
     text: 'Был ли задан фильтр по городу? Уточни, это был запрос без города или с параметром city=kazan.',
   },
   'ask-city': {
-    kind: 'clarification', rules: [], followUp: true,
+    kind: 'clarification', rules: [], followUp: 'kazan',
     text: 'Уточни, был ли это фильтр по Казани. Для другого города в SEARCH-01 нет контрольного запроса.',
   },
   clarify: {
@@ -50,26 +50,32 @@ const withoutFilter = [
   /без (?:фильтра|(?:выбора |указания |параметра )?(?:город|city)|привязки к (?:городу|населенному пункту))/,
   /(?:город|city).{0,18}(?:не (?:выбран|задан|указан|передан|заполнен)|пуст|отсутств)/,
   /нет (?:параметра )?(?:city|города|фильтра)|фильтра не было|фильтр не (?:задан|указан|передан)/,
+  /параметр.{0,18}не (?:передавал|отправлял|указал)/,
   /не (?:выбирал[аи]?|выбрал[аи]?|указал[аи]?|задавал[аи]?|передавал[аи]?) (?:город|city|фильтр)/,
 ];
 
 export function isActionRequest(query: string) {
-  return /опубликуй|опубликовать|подтверд(?:и|ить) публикац|запусти|выполни (?:проверку|запрос)|сделай прогон|(?:отправь|запиши).*(?:задач|трекер|проверк|прогон)/.test(query);
+  return /(?:^|[^\p{L}])(?:опубликуй(?:те)?|запусти(?:те)?|подтверди(?:те)? публикацию|выполни(?:те)? (?:проверку|запрос)|сделай(?:те)? прогон)(?=$|[^\p{L}])/u.test(query)
+    || /(?:^|[^\p{L}])(?:отправь|запиши)(?=$|[^\p{L}]).*(?:задач|трекер|проверк|прогон)/u.test(query)
+    || /^(?:как|где|когда|можно ли|можешь) (?:мне )?(?:запустить|опубликовать)(?=$|[^\p{L}])/u.test(query);
 }
 
-export function guideIntent(query: string, waitingForFilter: boolean): BuddyIntent {
+export function guideIntent(query: string, followUp?: Reply['followUp']): BuddyIntent {
   const noCity = withoutFilter.some((pattern) => pattern.test(query));
   const mentionsKazan = /казан|kazan|контрольн/.test(query);
   const kazan = mentionsKazan && /city\s*=\s*kazan|контрольн|фильтр|поиск по казани|выбрал|указал|передал/.test(query);
   const status = /\b200\b|статус (?:ответа|запроса)|код ответа/.test(query);
 
   if (status) return kazan && !noCity ? 'status-kazan' : 'status';
+  if (/(?:оба|обоих) запрос|два запрос|кажд(?:ом|ый) запрос/.test(query)) return 'compare';
+  if (noCity && mentionsKazan && /оба|потом|контрольн/.test(query)) return 'compare';
   if (mentionsKazan && /достаточно|хватит|зачем|разниц|отлича/.test(query)) return 'compare';
   if (noCity) return 'no-city';
   if (kazan) return 'kazan';
 
-  if (waitingForFilter) {
-    if (/^нет[.!?]*$/.test(query)) return 'no-city';
+  if (followUp) {
+    if (/^нет[.!?]*$/.test(query)) return followUp === 'filter' ? 'no-city' : 'clarify';
+    if (/^да[.!?]*$/.test(query) && followUp === 'kazan') return 'kazan';
     if (/не по казани/.test(query)) return 'ask-city';
     if (mentionsKazan) return 'kazan';
     if (/^да[.!?]*$|фильтр (?:был|задан|указан)/.test(query)) return 'ask-city';

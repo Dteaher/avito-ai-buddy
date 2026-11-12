@@ -1,42 +1,49 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import { ArrowRight, ArrowUp, ArrowUpRight, BookOpen, LoaderCircle, Sparkles, X } from 'lucide-react';
-import type { BuddyAnswer, BuddyQuestion, Instruction, Publication, Workspace } from '../shared/contracts';
-import { errorMessage, post } from './api';
+import { ArrowRight, ArrowUp, ArrowUpRight, BookOpen, LoaderCircle, Sparkles, Terminal, X } from 'lucide-react';
+import type { BuddyAnswer, BuddyQuestion, Instruction, Publication, Run, RunEvidenceSource, Workspace } from '../shared/contracts';
+import { errorMessage, post, request } from './api';
+import { Evidence, formatTime } from './Evidence';
 
 const suggestions = ['Ответа 200 достаточно?', 'Как проверить поиск без города?', 'Что вернёт фильтр по Казани?'];
 const priceSuggestions = ['Достаточно, что 500 и 900 идут по порядку?', 'Куда поставить объявление без цены?'];
 
 interface Props {
-  workspace: Workspace;
+  workspace: Pick<Workspace, 'task' | 'kind' | 'buddyMode' | 'buddyProvider'>;
   openSource: (ruleNumber?: number) => void;
   publication?: Publication;
+  run?: Run;
 }
 
-export function Buddy({ workspace, openSource, publication }: Props) {
+type EvidenceDialogState = { source: RunEvidenceSource; run?: Run; error?: string };
+
+export function Buddy({ workspace, openSource, publication, run }: Props) {
   const { task, buddyMode } = workspace;
   const [messages, setMessages] = useState<{ question: string; answer?: BuddyAnswer }[]>([]);
   const [draft, setDraft] = useState('');
   const [pending, setPending] = useState(false);
   const [failure, setFailure] = useState('');
+  const [evidence, setEvidence] = useState<EvidenceDialogState>();
   const log = useRef<HTMLDivElement>(null);
+  const evidenceDialog = useRef<HTMLDialogElement>(null);
 
   useEffect(() => {
     const node = log.current;
     if (node) node.scrollTop = node.scrollHeight;
   }, [messages, pending, failure, publication]);
 
-  async function ask(question: string, retry = false) {
+  async function ask(question: string, keepDraft = false) {
     const text = question.trim();
     if (!text || pending) return;
-    const clarificationId = messages.findLast(({ answer }) => answer)?.answer?.clarificationId;
-    const input: BuddyQuestion = { question: text, clarificationId };
+    const previous = messages.findLast(({ answer }) => answer)?.answer;
+    const conversationId = messages.findLast(({ answer }) => answer?.conversationId)?.answer?.conversationId;
+    const input: BuddyQuestion = { question: text, clarificationId: previous?.clarificationId, conversationId, runId: run?.id };
     setFailure('');
     setPending(true);
     setMessages((previous) => [
       ...previous.filter(({ answer }) => answer),
       { question: text },
     ]);
-    if (!retry) setDraft('');
+    if (!keepDraft) setDraft('');
 
     try {
       const answer = await post<BuddyAnswer>(`/api/tasks/${task.id}/buddy`, input);
@@ -53,12 +60,31 @@ export function Buddy({ workspace, openSource, publication }: Props) {
     void ask(draft);
   }
 
+  async function openEvidence(source: RunEvidenceSource) {
+    setEvidence({ source, run: run?.id === source.runId ? run : undefined });
+    evidenceDialog.current?.showModal();
+    if (run?.id === source.runId) return;
+    try {
+      const snapshot = await request<Run>(`/api/tasks/${task.id}/runs/${source.runId}`);
+      setEvidence((previous) => previous?.source === source ? { source, run: snapshot } : previous);
+    } catch (error) {
+      setEvidence((previous) => previous?.source === source ? { source, error: errorMessage(error) } : previous);
+    }
+  }
+
   return (
     <aside className="buddy surface" aria-labelledby="buddy-title">
       <div className="buddy-header">
-        <div className="buddy-identity"><span className="buddy-mark"><Sparkles size={21} /></span><h2 id="buddy-title">AI-buddy</h2></div>
-        <span className="buddy-mode">{buddyMode === 'guide' ? 'Демо-справка' : 'Режим модели'}</span>
+        <div className="buddy-identity"><span className="buddy-mark"><Sparkles size={21} /></span><h2 id="buddy-title" tabIndex={-1}>AI-buddy</h2></div>
+        <span className="buddy-mode">{buddyMode === 'guide' ? 'Демо-справка' : workspace.buddyProvider === 'local' ? 'Локальная LLM' : 'LLM'}</span>
       </div>
+      {run && (
+        <div className="buddy-context">
+          <span><Terminal size={14} /> Контекст прогона</span>
+          <button className="text-link" type="button" disabled={pending} onClick={() => void ask(run.kind === 'price-order'
+            ? 'Что показал прогон?' : 'Что вернул каждый из двух запросов в моём прогоне и где расхождение?', true)}>Разобрать результат <ArrowUpRight size={14} /></button>
+        </div>
+      )}
       <div className="chat-log" ref={log} role="log" aria-label="Диалог с Buddy">
         {!messages.length && (
           <div className="welcome">
@@ -67,7 +93,7 @@ export function Buddy({ workspace, openSource, publication }: Props) {
               : 'Помогу разобраться в задаче и сверить ожидания с правилами команды. С чего начнём?'}</p>
             <div className="suggestions">
               {(workspace.kind === 'price-order' ? priceSuggestions : suggestions).map((question) => (
-                <button key={question} type="button" onClick={() => void ask(question)}>{question}<ArrowUpRight size={15} /></button>
+                <button key={question} type="button" onClick={() => void ask(question, true)}>{question}<ArrowUpRight size={15} /></button>
               ))}
             </div>
           </div>
@@ -75,13 +101,19 @@ export function Buddy({ workspace, openSource, publication }: Props) {
         {messages.map(({ question, answer }, index) => (
           <div className="chat-exchange" key={index}>
             <p className="bubble question">{question}</p>
-            {answer?.mode === 'guide-fallback' && <p className="fallback-note">Модель недоступна. Ответ из демо-справки.</p>}
+            {answer?.mode === 'guide-fallback' && <p className="fallback-note">{answer.fallbackReason === 'invalid-response'
+              ? 'Ответ модели не прошёл проверку. Показана демо-справка.' : 'Модель недоступна. Ответ из демо-справки.'}</p>}
+            {answer?.sources.some((source) => 'runId' in source && source.runId !== run?.id) && <p className="fallback-note">Ответ по предыдущему прогону</p>}
             {answer && <p className="bubble assistant">{answer.text}</p>}
             {!!answer?.sources.length && (
               <div className="source-links">
-                {answer.sources.map(({ instructionId, ruleNumber }) => (
-                  <button key={`${instructionId}-${ruleNumber}`} type="button" className="source-link" onClick={() => openSource(ruleNumber)}>
-                    <BookOpen size={16} /><span>Тестовая инструкция · пункт {ruleNumber}</span><ArrowUpRight size={15} />
+                {answer.sources.map((source) => 'runId' in source ? (
+                  <button key={`${source.runId}-${source.checkId}`} type="button" className="source-link" onClick={() => void openEvidence(source)}>
+                    <Terminal size={16} /><span>Ответ стенда · {source.label}</span><ArrowUpRight size={15} />
+                  </button>
+                ) : (
+                  <button key={`${source.instructionId}-${source.ruleNumber}`} type="button" className="source-link" onClick={() => openSource(source.ruleNumber)}>
+                    <BookOpen size={16} /><span>Тестовая инструкция · пункт {source.ruleNumber}</span><ArrowUpRight size={15} />
                   </button>
                 ))}
               </div>
@@ -101,11 +133,32 @@ export function Buddy({ workspace, openSource, publication }: Props) {
         {publication && <p className="bubble assistant">Результат сохранён в тестовом трекере. <a href={publication.url} className="text-link">Ссылка на запись <ArrowUpRight size={15} /></a></p>}
       </div>
       <form className="chat-form" onSubmit={send}>
-        <input aria-label="Спросить Buddy" placeholder="Спросить Buddy" value={draft} maxLength={500} onChange={(event) => setDraft(event.target.value)} />
+        <textarea aria-label="Спросить Buddy" placeholder="Спросить Buddy" value={draft} rows={1} maxLength={500}
+          onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => {
+            if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+              event.preventDefault();
+              void ask(draft);
+            }
+          }} />
         <button type="submit" aria-label="Отправить вопрос" title="Отправить вопрос" disabled={pending || !draft.trim()}>
           <ArrowUp size={22} />
         </button>
       </form>
+      <dialog ref={evidenceDialog} className="instruction-dialog evidence-dialog" aria-labelledby="evidence-title">
+        <div className="dialog-content">
+          <form method="dialog" className="dialog-close">
+            <button type="submit" className="icon-button" aria-label="Закрыть ответ стенда"><X size={20} /></button>
+          </form>
+          <span className="test-guide"><Terminal size={16} /> Сохранённый прогон · {task.id}</span>
+          <h2 id="evidence-title">{evidence?.source.label ?? 'Ответ стенда'}</h2>
+          {evidence?.run && <>
+            <p><time dateTime={evidence.run.checkedAt}>{formatTime(evidence.run.checkedAt)}</time></p>
+            <Evidence run={evidence.run} checkId={evidence.source.checkId} />
+          </>}
+          {evidence?.error && <p role="alert">{evidence.error}</p>}
+          {evidence && !evidence.run && !evidence.error && <p role="status">Загружаем прогон…</p>}
+        </div>
+      </dialog>
     </aside>
   );
 }
@@ -124,4 +177,10 @@ export function InstructionDialog({ instruction, dialog }: { instruction: Instru
       </div>
     </dialog>
   );
+}
+
+export function showInstruction(dialog: HTMLDialogElement | null, ruleNumber?: number) {
+  if (!dialog) return;
+  dialog.showModal();
+  if (ruleNumber !== undefined) dialog.querySelector<HTMLElement>(`[data-rule-number="${ruleNumber}"]`)?.focus();
 }

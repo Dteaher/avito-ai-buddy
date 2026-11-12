@@ -133,13 +133,17 @@ describe('First Check workspace', () => {
   });
 
   it('loads a durable record from its direct URL', async () => {
-    api();
+    const mock = api();
     window.history.replaceState(null, '', '/records/QA-demo');
     render(<App />);
     await screen.findByRole('heading', { name: 'Запись проверки' });
     expect(screen.getByText('QA-demo')).toBeTruthy();
     expect(screen.getByText('Самара отсутствует')).toBeTruthy();
     expect(screen.getByRole('link', { name: /К рабочему пространству/ }).getAttribute('href')).toBe('/');
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Разобрать результат' }));
+    await screen.findByText('Проверь содержимое ответа.');
+    const discussion = mock.mock.calls.find(([url]) => url.endsWith('/SEARCH-01/buddy'));
+    expect(JSON.parse(String(discussion?.[1]?.body))).toEqual({ question: 'Что вернул каждый из двух запросов в моём прогоне и где расхождение?', runId: run.id });
   });
 
   it('separates a matching response from an expectation that conflicts with the rule', async () => {
@@ -170,6 +174,28 @@ describe('First Check workspace', () => {
     await user.click(within(failure).getByRole('button', { name: 'Повторить' }));
     expect(await screen.findByText('Проверь содержимое ответа.')).toBeTruthy();
     expect(screen.getAllByText('Ответа 200 достаточно?')).toHaveLength(1);
+  });
+
+  it('asks about the current run and continues the model conversation', async () => {
+    const mock = api({ answers: [
+      { kind: 'guidance', text: 'Самара отсутствует в основном запросе.', mode: 'model', conversationId: 'conversation-1',
+        sources: [{ runId: run.id, checkId: 'without-city', label: 'Без города' }] },
+      { kind: 'guidance', text: 'Контрольный запрос вернул Казань.', mode: 'model', conversationId: 'conversation-1',
+        sources: [{ runId: run.id, checkId: 'kazan', label: 'Фильтр по Казани' }] },
+    ] });
+    const user = userEvent.setup();
+    render(<App />);
+    const launch = await prepare(user);
+    await user.click(launch);
+    await user.click(await screen.findByRole('button', { name: 'Разобрать результат' }));
+    const buddy = screen.getByRole('complementary', { name: 'AI-buddy' });
+    await within(buddy).findByRole('button', { name: 'Ответ стенда · Без города' });
+    await user.type(within(buddy).getByRole('textbox', { name: 'Спросить Buddy' }), 'А контрольный?{Enter}');
+    await within(buddy).findByRole('button', { name: 'Ответ стенда · Фильтр по Казани' });
+    expect(mock.mock.calls.filter(([url]) => url.endsWith('/buddy')).map(([, options]) => JSON.parse(String(options?.body)))).toEqual([
+      { question: 'Что вернул каждый из двух запросов в моём прогоне и где расхождение?', runId: run.id },
+      { question: 'А контрольный?', runId: run.id, conversationId: 'conversation-1' },
+    ]);
   });
 
   it('replies to a clarification and visibly labels the instruction fallback', async () => {

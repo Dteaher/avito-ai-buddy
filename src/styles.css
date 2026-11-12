@@ -157,16 +157,22 @@ details[open] > summary > .disclosure { transform: rotate(180deg); }
 .bubble .text-link { margin-top: 5px; }
 .chat-form { display: flex; align-items: center; gap: 6px; min-height: 49px; padding: 4px; margin-top: 8px; background: #fff; border: 1px solid #d8c5ef; border-radius: 13px; }
 .chat-form:focus-within { border-color: #a872ed; box-shadow: 0 0 0 2px #cab0ef; }
-.chat-form input { width: 100%; min-width: 0; min-height: 36px; border: 0; padding: 3px 7px; outline: none; color: var(--ink); font-size: 16px; background: transparent; }
-.chat-form input::placeholder { color: #6f6776; font-size: 14px; }
+.chat-form textarea { width: 100%; min-width: 0; min-height: 36px; max-height: 106px; field-sizing: content; resize: none; border: 0; padding: 7px; outline: none; color: var(--ink); font: inherit; font-size: 16px; background: transparent; }
+.chat-form textarea::placeholder { color: #6f6776; font-size: 14px; }
+.buddy-context { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 6px; margin-top: 10px; padding-block: 6px; border-block: 1px solid #e4d7ee; }
+.buddy-context > span { display: inline-flex; align-items: center; gap: 5px; color: #5c3981; font-size: 12px; font-weight: 680; }
+.buddy-context button { padding: 3px 1px; min-height: 32px; }
+.buddy-context button:disabled { color: #665e6d; }
 .chat-form button { display: grid; place-items: center; width: 40px; height: 40px; flex-shrink: 0; border: 0; border-radius: 9px; background: #7726df; color: #fff; }
 .chat-form button:hover:not(:disabled) { background: #6317c4; }
 .chat-form button:disabled { color: #633b95; background: #ebdff9; }
 
 .instruction-dialog { width: min(100% - 36px, 570px); padding: 0; border: 1px solid #ebe3ee; border-radius: 22px; color: var(--ink); box-shadow: 0 20px 65px #26203235; }
 .instruction-dialog::backdrop { background: #21152e65; }
+.evidence-dialog { width: min(100% - 36px, 690px); }
 .dialog-content { position: relative; padding: 25px; }
 .dialog-close { position: absolute; top: 13px; right: 13px; }
+.evidence-dialog .dialog-close { position: sticky; top: 13px; z-index: 1; float: right; margin: -12px -12px 0 0; }
 .icon-button { display: grid; place-items: center; width: 42px; height: 42px; border: 0; border-radius: 50%; background: #f3edf8; color: #5b4080; }
 .icon-button:hover { background: #eaddf4; }
 .test-guide { display: inline-flex; align-items: center; gap: 6px; color: var(--violet); font-size: 12px; font-weight: 730; }
@@ -185,7 +191,8 @@ details[open] > summary > .disclosure { transform: rotate(180deg); }
 .published p { margin-top: 4px; }
 .publication-link { justify-content: space-between; text-align: left; animation: reveal 220ms ease-out both; }
 .publication-link small { display: block; overflow-wrap: anywhere; font-size: 10px; margin-top: 3px; }
-.record-page { width: min(100% - 80px, 900px); padding-top: 27px; }
+.record-page { padding-top: 27px; }
+.record-discuss { display: none; }
 .record-hero { padding: 23px 0; }
 .record-hero h1 { font-size: clamp(41px, 5.2vw, 68px); }
 .record-surface { padding: 24px; }
@@ -250,6 +257,7 @@ details[open] > summary > .disclosure { transform: rotate(180deg); }
 }
 
 @media (max-width: 750px) {
+  .record-discuss { display: inline-flex; margin-bottom: 14px; min-height: 38px; }
   .container { width: calc(100% - 36px); }
   .masthead { min-height: 61px; }
   .brand { font-size: 23px; gap: 9px; }

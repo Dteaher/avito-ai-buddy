@@ -7,7 +7,7 @@ export const priceReplies = {
   'whole-order': { kind: 'guidance', rules: [1, 2], text: `Две числовые цены могут идти по возрастанию, даже если объявление без цены стоит раньше них. ${wholeOrder}` },
   'no-price': { kind: 'guidance', rules: [2], text: noPrice },
   status: { kind: 'guidance', rules: [3, 1, 2], text: `HTTP 200 подтверждает обработку запроса. Проверь последовательность объявлений. ${wholeOrder}` },
-  'ask-price': { kind: 'clarification', rules: [], followUp: true, text: 'Есть ли цена у первого объявления? Если есть, какая?' },
+  'ask-price': { kind: 'clarification', rules: [], followUp: 'price', text: 'Есть ли цена у первого объявления? Если есть, какая?' },
   clarify: { kind: 'clarification', rules: [], text: 'Уточни, что проверяешь в SORT-01 — порядок числовых цен или место объявления без цены?' },
   insufficient: { kind: 'insufficient', rules: [], text: 'В тестовой инструкции SORT-01 нет сведений об этом. Она описывает сортировку по цене и место объявления без цены.' },
   action: { ...replies.action, text: 'Задай ожидаемый порядок объявлений и нажми «Запустить проверку». По ответу стенда сверь позиции. После просмотра результата можешь подтвердить публикацию.' },

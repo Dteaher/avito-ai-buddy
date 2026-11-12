@@ -62,7 +62,7 @@ export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) 
       return;
     }
     res.cookie(cookieName, session, { httpOnly: true, sameSite: 'strict', path: '/api' });
-    const context = { tasks: assignedTasks, buddyMode: buddy.mode };
+    const context = { tasks: assignedTasks, buddyMode: buddy.mode, buddyProvider: buddy.provider };
     const workspace: Workspace = selected === sortTask.id
       ? { ...context, kind: 'price-order', task: sortTask, checks: [priceCheck], orderItems: priceItems }
       : { ...context, task, checks: [...checks] };
@@ -93,7 +93,29 @@ export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) 
       res.status(400).json({ message: 'Проверь вопрос и попробуй ещё раз. Максимум 500 символов.' });
       return;
     }
-    res.json(await buddy.answer(req.params.taskId === sortTask.id ? sortTask : task, input));
+    const current = req.params.taskId === sortTask.id ? sortTask : task;
+    const run = input.runId ? store.readRun(input.runId, trainee, current.id) : undefined;
+    if (input.runId && !run) {
+      res.status(404).json({ message: 'Прогон недоступен в этой задаче.' });
+      return;
+    }
+    const requestLifetime = new AbortController();
+    res.once('close', () => requestLifetime.abort());
+    try {
+      const answer = await buddy.answer(current, input, run, requestLifetime.signal);
+      if (!requestLifetime.signal.aborted) res.json(answer);
+    } catch (error) {
+      if (!requestLifetime.signal.aborted) throw error;
+    }
+  });
+
+  app.get('/api/tasks/:taskId/runs/:runId', assignedTask, (req, res) => {
+    const run = store.readRun(String(req.params.runId), trainee, String(req.params.taskId));
+    if (!run) {
+      res.status(404).json({ message: 'Прогон недоступен в этой задаче.' });
+      return;
+    }
+    res.json(run);
   });
 
   app.post('/api/tasks/:taskId/runs', assignedTask, async (req, res) => {

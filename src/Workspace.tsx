@@ -3,7 +3,7 @@ import { ArrowLeft, ArrowRight, ArrowUpRight, BookOpen, Check, CircleAlert, Circ
 import { cities, type CheckId, type City, type Publication, type Run, type Workspace as WorkspaceData } from '../shared/contracts';
 import heroImage from './assets/search-shapes.webp';
 import { errorMessage, post } from './api';
-import { Buddy, InstructionDialog } from './Buddy';
+import { Buddy, InstructionDialog, showInstruction } from './Buddy';
 import { Evidence, RunContext } from './Evidence';
 import { PriceOrderInput } from './PriceOrder';
 
@@ -99,12 +99,7 @@ export function Workspace({ data }: { data: WorkspaceData }) {
     }
   }
 
-  function openSource(ruleNumber?: number) {
-    const node = dialog.current;
-    if (!node) return;
-    node.showModal();
-    if (ruleNumber !== undefined) node.querySelector<HTMLElement>(`[data-rule-number="${ruleNumber}"]`)?.focus();
-  }
+  const openSource = (ruleNumber?: number) => showInstruction(dialog.current, ruleNumber);
 
   return (
     <main className="container workspace">
@@ -223,7 +218,7 @@ export function Workspace({ data }: { data: WorkspaceData }) {
             </>
           )}
         </section>
-        <Buddy workspace={data} openSource={openSource} publication={publication} />
+        <Buddy workspace={data} openSource={openSource} publication={publication} run={run} />
       </div>
       <InstructionDialog instruction={task.instruction} dialog={dialog} />
     </main>

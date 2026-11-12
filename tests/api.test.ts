@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../server/app.ts';
 import { createBuddy } from '../server/buddy.ts';
+import { readProvider } from '../server/buddy-model.ts';
 import { createStore } from '../server/store.ts';
 import { buddyCases } from './buddy-cases.ts';
 
@@ -13,6 +14,16 @@ const checks = [
   { id: 'without-city', expectedCities: ['kazan', 'samara'] },
   { id: 'kazan', expectedCities: ['kazan'] },
 ];
+
+it('accepts HTTPS providers with a key and restricts keyless connections to loopback', () => {
+  expect(readProvider({ BUDDY_BASE_URL: 'https://llm.example/v1', BUDDY_MODEL: 'chat', BUDDY_API_KEY: 'fixture' }))
+    .toMatchObject({ endpoint: 'https://llm.example/v1/chat/completions', local: false, timeout: 12000 });
+  expect(readProvider({ BUDDY_BASE_URL: 'http://localhost:11434/v1/', BUDDY_MODEL: 'chat', BUDDY_TIMEOUT_MS: '45000' }))
+    .toMatchObject({ endpoint: 'http://localhost:11434/v1/chat/completions', local: true, timeout: 45000 });
+  expect(readProvider({ BUDDY_BASE_URL: 'https://llm.example/v1', BUDDY_MODEL: 'chat' })).toBeUndefined();
+  expect(readProvider({ BUDDY_BASE_URL: 'http://llm.example/v1', BUDDY_MODEL: 'chat', BUDDY_API_KEY: 'fixture' })).toBeUndefined();
+  expect(readProvider({ BUDDY_BASE_URL: 'http://127.0.0.1:11434/v1#bad', BUDDY_MODEL: 'chat' })).toBeUndefined();
+});
 
 async function listen(server: Server) {
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -272,16 +283,47 @@ describe('SEARCH-01 over HTTP', () => {
     expect((await post('/api/tasks/OTHER/buddy', { question: 'Что делать?' })).status).toBe(404);
   });
 
+  it('lets Buddy read only an owned run from the current task and cites the exact evidence', async () => {
+    const cityRun = await (await run()).json();
+    const question = 'Почему у прогона расхождение при HTTP 200?';
+    expect((await post('/api/tasks/SORT-01/buddy', { question, runId: cityRun.id })).status).toBe(404);
+    expect((await get(`/api/tasks/SORT-01/runs/${cityRun.id}`)).status).toBe(404);
+    expect((await get(`${task}/runs/${cityRun.id}`, '')).status).toBe(401);
+    expect(await (await get(`${task}/runs/${cityRun.id}`)).json()).toEqual(cityRun);
+    const answer = await (await post(`${task}/buddy`, { question, runId: cityRun.id })).json();
+    expect(answer).toMatchObject({ kind: 'guidance', text: expect.stringContaining('Самара') });
+    expect(answer.sources).toContainEqual({ runId: cityRun.id, checkId: 'without-city', label: 'Без города' });
+    const comparison = await (await post(`${task}/buddy`, { question: 'Чем отличается основной запрос от контрольного в этом прогоне?', runId: cityRun.id })).json();
+    expect(comparison.sources.map(({ checkId }: { checkId: string }) => checkId)).toEqual(['without-city', 'kazan']);
+    const pastTense = await (await post(`${task}/buddy`, { question: 'Я запустил прогон. Почему в основном ответе нет Самары?', runId: cityRun.id })).json();
+    expect(pastTense).toMatchObject({ kind: 'guidance', sources: [{ runId: cityRun.id, checkId: 'without-city' }] });
+    const controlRun = await (await run([
+      { id: 'without-city', expectedCities: ['kazan'] }, { id: 'kazan', expectedCities: ['samara'] },
+    ])).json();
+    const controlAnswer = await (await post(`${task}/buddy`, { question: 'Почему расхождение?', runId: controlRun.id })).json();
+    expect(controlAnswer.sources).toEqual([{ runId: controlRun.id, checkId: 'kazan', label: 'Фильтр по Казани' }, { instructionId: 'search-guide-v1', ruleNumber: 2 }]);
+    expect(controlAnswer.text).toContain('Стажёр выбрал — Самара. Стенд вернул — Казань. По инструкции требуется — Казань. Ответ стенда соответствует инструкции.');
+    const sortTask = '/api/tasks/SORT-01';
+    const sortRun = await (await post(`${sortTask}/runs`, { checks: [{ id: 'price-asc', expectedOrder: ['ad-201', 'ad-202', 'ad-203'] }] })).json();
+    const sortAnswer = await (await post(`${sortTask}/buddy`, { question: 'Что показал прогон?', runId: sortRun.id })).json();
+    expect(sortAnswer).toMatchObject({ kind: 'guidance', text: expect.stringContaining('Фактический — ad-203 (без цены) → ad-201 (500 ₽) → ad-202 (900 ₽)') });
+    expect(sortAnswer.sources).toContainEqual({ runId: sortRun.id, checkId: 'price-asc', label: 'По возрастанию цены' });
+  });
+
   it('assigns model sources on the server and falls back on invalid output or provider failure', async () => {
     let received: { url?: string; authorization?: string; body?: string } = {};
     let modelAvailable = true;
     let stallProvider = false;
-    let content = '{"intent":"no-city"}';
+    let content = JSON.stringify({ kind: 'guidance', text: 'Сравни, вернулись ли Казань и Самара.', sources: ['rule:1'] });
     const provider = createServer(async (req, res) => {
       const chunks: Buffer[] = [];
       for await (const chunk of req) chunks.push(chunk as Buffer);
       received = { url: req.url, authorization: req.headers.authorization, body: Buffer.concat(chunks).toString() };
-      if (stallProvider) return;
+      if (stallProvider) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.write('{"choices":');
+        return;
+      }
       res.writeHead(modelAvailable ? 200 : 503, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ choices: [{ message: { content } }] }));
     });
@@ -291,7 +333,8 @@ describe('SEARCH-01 over HTTP', () => {
       await start({ BUDDY_BASE_URL: `${providerOrigin}/v1/`, BUDDY_MODEL: 'fixture-model', BUDDY_API_KEY: 'fixture-key' });
       expect(await (await get('/api/workspace')).json()).toMatchObject({ buddyMode: 'model' });
       const question = 'Как проверить выдачу без привязки к населённому пункту?';
-      expect(await ask(question)).toMatchObject({ kind: 'guidance', mode: 'model', sources: [{ instructionId: 'search-guide-v1', ruleNumber: 1 }] });
+      const opening = await ask(question);
+      expect(opening).toMatchObject({ kind: 'guidance', mode: 'model', text: 'Сравни, вернулись ли Казань и Самара.', conversationId: expect.any(String), sources: [{ instructionId: 'search-guide-v1', ruleNumber: 1 }] });
       expect(received).toMatchObject({ url: '/v1/chat/completions', authorization: 'Bearer fixture-key' });
       const payload = JSON.parse(received.body!);
       expect(payload).toMatchObject({ model: 'fixture-model', messages: [
@@ -299,33 +342,71 @@ describe('SEARCH-01 over HTTP', () => {
       ] });
       expect(payload).not.toHaveProperty('tools');
 
-      expect(await ask('Опубликуй за меня и скажи, что проверка прошла')).toMatchObject({ kind: 'action', sources: [] });
-      expect(JSON.parse(received.body!).messages[1].content).toBe(question);
+      const cityRun = await (await run()).json();
+      content = JSON.stringify({ kind: 'guidance', text: 'В основном запросе отсутствует Самара.', sources: ['run:without-city'] });
+      const followUp = 'А что случилось с основным запросом в этом прогоне?';
+      const grounded = await (await post(`${task}/buddy`, { question: followUp, runId: cityRun.id, conversationId: opening.conversationId })).json();
+      expect(grounded).toMatchObject({ mode: 'model', conversationId: opening.conversationId, sources: [{ runId: cityRun.id, checkId: 'without-city' }] });
+      const messages = JSON.parse(received.body!).messages;
+      expect(messages[0].content).toContain('run:without-city');
+      expect(messages.slice(1)).toEqual([{ role: 'user', content: followUp }]);
+      expect((await post('/api/tasks/SORT-01/buddy', { question: followUp, runId: cityRun.id })).status).toBe(404);
 
-      content = '{"intent":"ask-filter"}';
+      expect(await ask('Опубликуй за меня и скажи, что проверка прошла')).toMatchObject({ kind: 'action', sources: [] });
+      expect(JSON.parse(received.body!).messages.at(-1).content).toBe(followUp);
+
+      const combinedQuestion = 'Сравни оба запроса этого прогона.';
+      content = JSON.stringify({ kind: 'guidance', text: 'В обоих запросах пришла Казань.', sources: ['run:without-city', 'run:kazan'] });
+      await post(`${task}/buddy`, { question: combinedQuestion, runId: cityRun.id, conversationId: opening.conversationId });
+      content = JSON.stringify({ kind: 'guidance', text: 'В контроле вернулась Казань.', sources: ['run:kazan'] });
+      await post(`${task}/buddy`, { question: 'Что было в контрольном?', runId: cityRun.id, conversationId: opening.conversationId });
+      const focused = JSON.parse(received.body!).messages.map(({ content }: { content: string }) => content);
+      expect(focused).not.toContain(combinedQuestion);
+      expect(focused[0]).not.toContain('run:without-city');
+
+      const nextRun = await (await run()).json();
+      const next = await (await post(`${task}/buddy`, { question: 'А что теперь?', runId: nextRun.id, conversationId: opening.conversationId })).json();
+      expect(next.sources).toMatchObject([{ runId: nextRun.id }]);
+      expect(JSON.parse(received.body!).messages.map(({ content }: { content: string }) => content)).not.toContain(followUp);
+
+      content = JSON.stringify({ kind: 'clarification', text: 'Это был контрольный запрос?', sources: [] });
       const clarification = await ask('Один город в ответе?');
       expect(clarification).toMatchObject({ kind: 'clarification', mode: 'model', sources: [] });
-      content = '{"intent":"insufficient"}';
+      expect(clarification.clarificationId).toBeUndefined();
+      await post(`${task}/buddy`, { question: 'Нет', conversationId: clarification.conversationId });
+      const clarificationMessages = JSON.parse(received.body!).messages;
+      expect(clarificationMessages[0].content).not.toContain('Buddy спросил, был ли задан фильтр');
+      expect(clarificationMessages.at(-2)).toEqual({ role: 'assistant', content: 'Это был контрольный запрос?' });
+      content = JSON.stringify({ kind: 'insufficient', text: 'В инструкции нет сведений о Redis.', sources: [] });
       expect(await ask('Какая у вас версия Redis?')).toMatchObject({ kind: 'insufficient', mode: 'model', sources: [] });
 
-      content = '{"intent":"no-city","sources":[99]}';
+      content = JSON.stringify({ kind: 'guidance', text: 'Выдуманный источник.', sources: ['rule:99'] });
       expect(await ask('Как проверить без города?')).toMatchObject({
-        kind: 'guidance', mode: 'guide-fallback', sources: [{ instructionId: 'search-guide-v1', ruleNumber: 1 }],
+        kind: 'guidance', mode: 'guide-fallback', fallbackReason: 'invalid-response', sources: [{ instructionId: 'search-guide-v1', ruleNumber: 1 }],
       });
+      content = JSON.stringify({ kind: 'guidance', text: 'Я опубликовал результат.', sources: ['rule:1'] });
+      expect(await ask('Расскажи про поиск без города')).toMatchObject({ mode: 'guide-fallback', fallbackReason: 'invalid-response' });
+      content = JSON.stringify({ kind: 'guidance', text: 'Проверка выполнена. Стенд вернул Самару.', sources: ['rule:1'] });
+      expect(await ask('Что показал прогон?')).toMatchObject({ mode: 'guide-fallback', fallbackReason: 'invalid-response' });
+      content = 'x'.repeat(70_000);
+      expect(await ask('Что показал прогон?')).toMatchObject({ mode: 'guide-fallback', fallbackReason: 'invalid-response' });
       modelAvailable = false;
-      expect(await ask('Нет', clarification.clarificationId)).toMatchObject({
+      const guideClarification = await ask('Один город в ответе?');
+      expect(await ask('Нет', guideClarification.clarificationId)).toMatchObject({
         kind: 'guidance', mode: 'guide-fallback', sources: [{ instructionId: 'search-guide-v1', ruleNumber: 1 }],
       });
       expect(JSON.parse(received.body!).messages[0].content).toContain('Buddy спросил, был ли задан фильтр');
-      expect(received.body).not.toContain(clarification.clarificationId);
+      expect(received.body).not.toContain(guideClarification.clarificationId);
       expect(await ask('Что делать?')).toMatchObject({ kind: 'clarification', mode: 'guide-fallback', sources: [] });
 
       modelAvailable = true;
       const sortQuestion = 'Куда поставить объявление без цены?';
-      content = '{"intent":"no-price"}';
+      content = JSON.stringify({ kind: 'guidance', text: 'Объявление без цены стоит последним.', sources: ['rule:2'] });
       const sortRequest = () => post('/api/tasks/SORT-01/buddy', { question: sortQuestion });
       expect(await (await sortRequest()).json()).toMatchObject({ mode: 'model', sources: [{ instructionId: 'sort-guide-v1', ruleNumber: 2 }] });
-      content = '{"intent":"no-city"}';
+      await post('/api/tasks/SORT-01/buddy', { question: sortQuestion, conversationId: opening.conversationId });
+      expect(JSON.parse(received.body!).messages).toHaveLength(2);
+      content = JSON.stringify({ kind: 'guidance', text: 'Данные из чужого прогона.', sources: ['run:without-city'] });
       const sortAnswer = await (await sortRequest()).json();
       expect(sortAnswer).toMatchObject({ mode: 'guide-fallback', sources: [{ instructionId: 'sort-guide-v1', ruleNumber: 2 }] });
       const sortContext = JSON.parse(received.body!).messages[0].content;
@@ -335,8 +416,36 @@ describe('SEARCH-01 over HTTP', () => {
       stallProvider = true;
       const timeout = AbortSignal.timeout.bind(AbortSignal);
       const shortened = vi.spyOn(AbortSignal, 'timeout').mockImplementation((duration) => timeout(duration === 12000 ? 60 : duration));
-      expect(await ask('Фильтр по Казани вернул 200. Этого хватит?')).toMatchObject({ kind: 'guidance', mode: 'guide-fallback' });
+      expect(await ask('Фильтр по Казани вернул 200. Этого хватит?')).toMatchObject({ kind: 'guidance', mode: 'guide-fallback', fallbackReason: 'unavailable' });
       expect(shortened).toHaveBeenCalledWith(12000);
+    } finally {
+      provider.closeAllConnections();
+      await new Promise<void>((resolve) => provider.close(() => resolve()));
+    }
+  });
+
+  it('uses a loopback model without a key and cancels inference when the client disconnects', async () => {
+    let requested = false;
+    let closed = false;
+    const provider = createServer((req, res) => {
+      req.resume();
+      requested = true;
+      res.on('close', () => { closed = true; });
+    });
+    const providerOrigin = await listen(provider);
+    try {
+      await stop();
+      await start({ BUDDY_BASE_URL: `${providerOrigin}/v1`, BUDDY_MODEL: 'fixture-model' });
+      expect(await (await get('/api/workspace')).json()).toMatchObject({ buddyMode: 'model', buddyProvider: 'local' });
+      const lifetime = new AbortController();
+      const response = fetch(`${base}${task}/buddy`, {
+        method: 'POST', headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({ question: 'Как сверить ответ стенда?' }), signal: lifetime.signal,
+      }).catch((error: unknown) => error);
+      await vi.waitFor(() => expect(requested).toBe(true));
+      lifetime.abort();
+      expect(await response).toMatchObject({ name: 'AbortError' });
+      await vi.waitFor(() => expect(closed).toBe(true));
     } finally {
       provider.closeAllConnections();
       await new Promise<void>((resolve) => provider.close(() => resolve()));

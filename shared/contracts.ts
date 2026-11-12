@@ -36,6 +36,7 @@ interface WorkspaceBase {
   task: Task;
   tasks: Task[];
   buddyMode: 'guide' | 'model';
+  buddyProvider?: 'local' | 'remote';
 }
 
 export type Workspace = WorkspaceBase & (
@@ -104,12 +105,17 @@ export interface Publication {
 export interface BuddyQuestion {
   question: string;
   clarificationId?: string;
+  conversationId?: string;
+  runId?: string;
 }
 
-export interface BuddySource {
-  instructionId: string;
-  ruleNumber: number;
+export interface RunEvidenceSource {
+  runId: string;
+  checkId: CheckId | PriceCheck['id'];
+  label: string;
 }
+
+export type BuddySource = { instructionId: string; ruleNumber: number } | RunEvidenceSource;
 
 export interface BuddyAnswer {
   kind: 'guidance' | 'clarification' | 'insufficient' | 'action';
@@ -117,4 +123,6 @@ export interface BuddyAnswer {
   mode: Workspace['buddyMode'] | 'guide-fallback';
   sources: BuddySource[];
   clarificationId?: string;
+  conversationId?: string;
+  fallbackReason?: 'unavailable' | 'invalid-response';
 }

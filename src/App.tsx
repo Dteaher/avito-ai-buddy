@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react';
-import { ArrowDownRight, ArrowLeft, ArrowUpRight, Check, CircleAlert, LoaderCircle } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { ArrowDownRight, ArrowLeft, ArrowUpRight, Check, CircleAlert, LoaderCircle, MessageCircle } from 'lucide-react';
 import type { Publication, Workspace as WorkspaceData } from '../shared/contracts';
 import { errorMessage, request } from './api';
 import { Evidence, RunContext, formatTime } from './Evidence';
 import { NextTask, Workspace } from './Workspace';
+import { Buddy, InstructionDialog, showInstruction } from './Buddy';
 
 type Loaded = { workspace: WorkspaceData; publication?: Publication };
 
@@ -51,7 +52,7 @@ export function App() {
   return (
     <>
       <Header />
-      {data?.publication ? <Record publication={data.publication} /> : data ? <Workspace data={data.workspace} /> : (
+      {data?.publication ? <Record publication={data.publication} workspace={data.workspace} /> : data ? <Workspace data={data.workspace} /> : (
         <main className="container initial">
           {error ? (
             <section className="surface startup" role="alert">
@@ -67,8 +68,11 @@ export function App() {
   );
 }
 
-function Record({ publication }: { publication: Publication }) {
+function Record({ publication, workspace }: { publication: Publication; workspace: WorkspaceData }) {
   const { id, run, publishedAt } = publication;
+  const instruction = useRef<HTMLDialogElement>(null);
+  const task = run.task;
+  const buddyContext = { task, kind: run.kind, buddyMode: workspace.buddyMode, buddyProvider: workspace.buddyProvider };
   return (
     <main className="container record-page">
       <a href={run.kind === 'price-order' ? `/?task=${encodeURIComponent(run.task.id)}` : '/'} className="text-link back-link"><ArrowLeft size={17} /> К рабочему пространству</a>
@@ -77,16 +81,21 @@ function Record({ publication }: { publication: Publication }) {
         <h1>Запись проверки</h1>
         <p>{run.task.title}</p>
       </div>
-      <section className="surface record-surface">
-        <div className="record-banner">
-          <span className="signal ok"><Check size={17} /></span>
-          <div><strong>Опубликовано в тестовом трекере</strong><code>{id}</code></div>
-          <time dateTime={publishedAt}>{formatTime(publishedAt)}</time>
-        </div>
-        <RunContext run={run} showRules />
-        <Evidence run={run} />
-        {run.kind !== 'price-order' && <NextTask />}
-      </section>
+      <a href="#buddy-title" className="text-link record-discuss"><MessageCircle size={17} /> Обсудить запись с Buddy</a>
+      <div className="workspace-grid">
+        <section className="surface record-surface">
+          <div className="record-banner">
+            <span className="signal ok"><Check size={17} /></span>
+            <div><strong>Опубликовано в тестовом трекере</strong><code>{id}</code></div>
+            <time dateTime={publishedAt}>{formatTime(publishedAt)}</time>
+          </div>
+          <RunContext run={run} showRules />
+          <Evidence run={run} />
+          {run.kind !== 'price-order' && <NextTask />}
+        </section>
+        <Buddy workspace={buddyContext} run={run} openSource={(ruleNumber) => showInstruction(instruction.current, ruleNumber)} />
+      </div>
+      <InstructionDialog instruction={task.instruction} dialog={instruction} />
     </main>
   );
 }

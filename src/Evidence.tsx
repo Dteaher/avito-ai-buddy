@@ -1,5 +1,5 @@
 import { ArrowRight, Check, ChevronDown, CircleAlert, Clock3, Terminal, X } from 'lucide-react';
-import { cities, type CheckResult, type City, type PriceResult, type Run } from '../shared/contracts';
+import { cities, type CheckResult, type City, type PriceResult, type Run, type RunEvidenceSource } from '../shared/contracts';
 import { PriceComparison, priceLabel } from './PriceOrder';
 
 type ResponseCheck = CheckResult | PriceResult;
@@ -74,7 +74,17 @@ function ResponseDetails({ check }: { check: ResponseCheck }) {
   );
 }
 
-export function Evidence({ run, animate = false }: { run: Run; animate?: boolean }) {
+function CityEvidence({ check, label = check.label }: { check: CheckResult; label?: string }) {
+  return (
+    <section aria-label={label}>
+      <div className="request-heading"><RequestLine check={check} /><span className="http-status">HTTP {check.status}</span></div>
+      <Comparison check={check} />
+      <ResponseDetails check={check} />
+    </section>
+  );
+}
+
+export function Evidence({ run, animate = false, checkId }: { run: Run; animate?: boolean; checkId?: RunEvidenceSource['checkId'] }) {
   if (run.kind === 'price-order') {
     const [check] = run.checks;
     return (
@@ -86,13 +96,10 @@ export function Evidence({ run, animate = false }: { run: Run; animate?: boolean
     );
   }
   const [primary, control] = run.checks;
+  if (checkId) return <div className="evidence"><CityEvidence check={checkId === control.id ? control : primary} /></div>;
   return (
     <div className={`evidence${animate ? ' reveal' : ''}`}>
-      <section aria-label="Основной запрос">
-        <div className="request-heading"><RequestLine check={primary} /><span className="http-status">HTTP {primary.status}</span></div>
-        <Comparison check={primary} />
-        <ResponseDetails check={primary} />
-      </section>
+      <CityEvidence check={primary} label="Основной запрос" />
       <details className="control-details">
         <summary>
           <span className="control-label"><strong>Контрольный запрос</strong><span>{control.label}</span></span>
