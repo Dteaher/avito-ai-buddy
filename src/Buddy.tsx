@@ -1,8 +1,9 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import { ArrowRight, ArrowUp, ArrowUpRight, BookOpen, ChevronDown, LoaderCircle, Sparkles, Terminal, X } from 'lucide-react';
-import type { BuddyAnswer, BuddyQuestion, Instruction, Run, RunEvidenceSource, Workspace } from '../shared/contracts';
+import { cities, type BuddyAnswer, type BuddyQuestion, type CheckDraft, type Instruction, type PriceListing, type Run, type RunEvidenceSource, type Workspace } from '../shared/contracts';
 import { errorMessage, post, request } from './api';
 import { Evidence, formatTime } from './Evidence';
+import { Escalation } from './Escalation';
 
 const suggestions = ['Ответа 200 достаточно?', 'Как проверить поиск без города?', 'Что вернёт фильтр по Казани?'];
 const priceSuggestions = ['Достаточно, что 500 и 900 идут по порядку?', 'Куда поставить объявление без цены?'];
@@ -12,13 +13,17 @@ interface Props {
   openSource: (ruleNumber?: number) => void;
   run?: Run;
   collapsible?: boolean;
+  intent?: 'plan';
+  mode?: BuddyQuestion['mode'];
+  onDraft?: (draft: CheckDraft, question: string) => void;
+  orderItems?: PriceListing[];
 }
 
 type EvidenceDialogState = { source: RunEvidenceSource; run?: Run; error?: string };
 
-export function Buddy({ workspace, openSource, run, collapsible = false }: Props) {
+export function Buddy({ workspace, openSource, run, collapsible = false, intent, mode, onDraft, orderItems }: Props) {
   const { task, buddyMode } = workspace;
-  const [messages, setMessages] = useState<{ question: string; answer?: BuddyAnswer }[]>([]);
+  const [messages, setMessages] = useState<{ question: string; intent?: 'plan'; mode?: BuddyQuestion['mode']; answer?: BuddyAnswer }[]>([]);
   const [draft, setDraft] = useState('');
   const [pending, setPending] = useState(false);
   const [failure, setFailure] = useState('');
@@ -33,23 +38,26 @@ export function Buddy({ workspace, openSource, run, collapsible = false }: Props
     if (node) node.scrollTop = node.scrollHeight;
   }, [messages, pending, failure, expanded]);
 
-  async function ask(question: string, keepDraft = false) {
+  async function ask(question: string, keepDraft = false, requestedIntent?: 'plan') {
     const text = question.trim();
     if (!text || pending) return;
-    const previous = messages.findLast(({ answer }) => answer)?.answer;
-    const conversationId = messages.findLast(({ answer }) => answer?.conversationId)?.answer?.conversationId;
-    const input: BuddyQuestion = { question: text, clarificationId: previous?.clarificationId, conversationId, runId: run?.id };
+    const related = messages.filter((message) => message.intent === requestedIntent && message.mode === mode);
+    const previous = related.findLast(({ answer }) => answer)?.answer;
+    const conversationId = related.findLast(({ answer }) => answer?.conversationId)?.answer?.conversationId;
+    const input: BuddyQuestion = { question: text, clarificationId: previous?.clarificationId, conversationId,
+      runId: requestedIntent ? undefined : run?.id, intent: requestedIntent, mode };
+    const exchange = { question: text, intent: requestedIntent, mode };
     setFailure('');
     setPending(true);
     setMessages((previous) => [
       ...previous.filter(({ answer }) => answer),
-      { question: text },
+      exchange,
     ]);
     if (!keepDraft) setDraft('');
 
     try {
       const answer = await post<BuddyAnswer>(`/api/tasks/${task.id}/buddy`, input);
-      setMessages((previous) => [...previous.slice(0, -1), { question: text, answer }]);
+      setMessages((previous) => [...previous.slice(0, -1), { ...exchange, answer }]);
     } catch (error) {
       setFailure(errorMessage(error));
     } finally {
@@ -59,7 +67,7 @@ export function Buddy({ workspace, openSource, run, collapsible = false }: Props
 
   function send(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    void ask(draft);
+    void ask(draft, false, intent);
   }
 
   async function openEvidence(source: RunEvidenceSource) {
@@ -74,11 +82,19 @@ export function Buddy({ workspace, openSource, run, collapsible = false }: Props
     }
   }
 
+  if (mode === 'manual') return (
+    <aside className="surface buddy manual-panel" aria-label="Без Buddy">
+      <h2>Без Buddy</h2>
+      <button type="button" className="text-link" onClick={() => openSource()}>Открыть инструкцию <ArrowUpRight size={16} /></button>
+      <Escalation text={`Привет! Я выполняю первую проверку ${task.id}. Подскажи, пожалуйста, к кому обратиться с вопросом, для которого нет ответа в инструкции команды?`} />
+    </aside>
+  );
+
   return (
     <aside className="buddy surface" aria-labelledby="buddy-title" data-expanded={collapsible ? expanded : undefined}>
       <div className="buddy-header">
         <div className="buddy-identity"><span className="buddy-mark"><Sparkles size={21} /></span><h2 id="buddy-title" tabIndex={-1}>AI-buddy</h2></div>
-        <span className="buddy-mode">{buddyMode === 'guide' ? 'Демо-справка' : workspace.buddyProvider === 'local' ? 'Локальная LLM' : 'LLM'}</span>
+        <span className="buddy-mode">{mode === 'guide' || buddyMode === 'guide' ? 'Демо-справка' : workspace.buddyProvider === 'local' ? 'Локальная LLM' : 'LLM'}</span>
         {collapsible && <button className="buddy-toggle" type="button" aria-expanded={expanded} aria-controls={bodyId}
           onClick={() => setExpanded(!expanded)}>
           {expanded ? 'Свернуть' : 'Спросить'} <ChevronDown size={16} />
@@ -104,13 +120,24 @@ export function Buddy({ workspace, openSource, run, collapsible = false }: Props
               </div>
             </div>
           )}
-          {messages.map(({ question, answer }, index) => (
+          {messages.map(({ question, answer, mode: answerMode }, index) => (
             <div className="chat-exchange" key={index}>
               <p className="bubble question">{question}</p>
               {answer?.mode === 'guide-fallback' && <p className="fallback-note">{answer.fallbackReason === 'invalid-response'
                 ? 'Ответ модели не прошёл проверку. Показана демо-справка.' : 'Модель недоступна. Ответ из демо-справки.'}</p>}
               {answer?.sources.some((source) => 'runId' in source && source.runId !== run?.id) && <p className="fallback-note">Ответ по предыдущему прогону</p>}
               {answer && <p className="bubble assistant">{answer.text}</p>}
+              {answer?.draft && <div className="draft-preview">
+                <code>GET {answer.draft.path}</code>
+                <p>{answer.draft.checks.filter(({ id }) => id === answer.draft?.checkId).map((check) => 'expectedOrder' in check
+                  ? check.expectedOrder.map((id) => {
+                    const item = orderItems?.find((entry) => entry.id === id);
+                    return item?.price == null ? 'без цены' : `${item.price} ₽`;
+                  }).join(' → ') : check.expectedCities.map((city) => cities[city]).join(' · '))}</p>
+                {onDraft && mode === answerMode && !run && <button type="button" className="button secondary"
+                  onClick={() => { setExpanded(false); onDraft(answer.draft!, question); }}>Использовать черновик</button>}
+              </div>}
+              {answer?.escalation && <Escalation text={answer.escalation} />}
               {!!answer?.sources.length && (
                 <div className="source-links">
                   {answer.sources.map((source) => 'runId' in source ? (
@@ -133,16 +160,16 @@ export function Buddy({ workspace, openSource, run, collapsible = false }: Props
           {failure && (
             <div className="bubble assistant" role="alert">
               <p>{failure}</p>
-              <button type="button" className="text-link" onClick={() => void ask(messages.at(-1)!.question, true)}>Повторить <ArrowRight size={16} /></button>
+              <button type="button" className="text-link" onClick={() => void ask(messages.at(-1)!.question, true, messages.at(-1)!.intent)}>Повторить <ArrowRight size={16} /></button>
             </div>
           )}
         </div>
         <form className="chat-form" onSubmit={send}>
-          <textarea aria-label="Спросить Buddy" placeholder="Спросить Buddy" value={draft} rows={1} maxLength={500}
+          <textarea aria-label="Спросить Buddy" placeholder={intent ? 'Как ты хочешь проверить задачу?' : 'Спросить Buddy'} value={draft} rows={1} maxLength={500}
             onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => {
               if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
                 event.preventDefault();
-                void ask(draft);
+                void ask(draft, false, intent);
               }
             }} />
           <button type="submit" aria-label="Отправить вопрос" title="Отправить вопрос" disabled={pending || !draft.trim()}>

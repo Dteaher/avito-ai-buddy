@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { ArrowLeft, ArrowRight, ArrowUpRight, BookOpen, Check, ChevronDown, CircleAlert, ListChecks, LoaderCircle } from 'lucide-react';
-import { cities, type CheckId, type City, type Publication, type Run, type Workspace as WorkspaceData } from '../shared/contracts';
+import { cities, type BuddyQuestion, type CheckDraft, type CheckId, type City, type Preparation, type Publication, type Run, type Workspace as WorkspaceData } from '../shared/contracts';
 import heroImage from './assets/search-shapes.webp';
 import { errorMessage, post } from './api';
 import { Buddy, InstructionDialog, showInstruction } from './Buddy';
 import { Evidence, RunContext } from './Evidence';
 import { PriceOrderInput } from './PriceOrder';
+import { Conclusion } from './Conclusion';
 
-const stages = ['Разобраться', 'Подготовить', 'Проверить', 'Опубликовать'];
+const stages = ['Правило', 'Ожидание', 'Проверить', 'Передать'];
 type Choices = Partial<Record<CheckId, City[]>>;
 
 export function NextTask() {
@@ -19,7 +20,9 @@ export function NextTask() {
   );
 }
 
-export function Workspace({ data }: { data: WorkspaceData }) {
+export function Workspace({ data, mode, chooseMode }: {
+  data: WorkspaceData; mode?: BuddyQuestion['mode']; chooseMode: (mode: BuddyQuestion['mode']) => void;
+}) {
   const { task } = data;
   const priceTask = data.kind === 'price-order';
   const taskPath = `/api/tasks/${task.id}`;
@@ -27,6 +30,8 @@ export function Workspace({ data }: { data: WorkspaceData }) {
   const [furthest, setFurthest] = useState(0);
   const [choices, setChoices] = useState<Choices>({});
   const [order, setOrder] = useState<string[]>([]);
+  const [preparation, setPreparation] = useState<Preparation>();
+  const [conclusion, setConclusion] = useState('');
   const [run, setRun] = useState<Run>();
   const [publication, setPublication] = useState<Publication>();
   const [busy, setBusy] = useState(false);
@@ -73,6 +78,19 @@ export function Workspace({ data }: { data: WorkspaceData }) {
     clearResult();
   }
 
+  function applyDraft(draft: CheckDraft, question: string) {
+    if (busy || run) return;
+    const choices: Choices = {};
+    for (const check of draft.checks) {
+      if ('expectedOrder' in check) setOrder(check.expectedOrder);
+      else choices[check.id] = check.expectedCities;
+    }
+    setChoices(choices);
+    setPreparation({ source: 'buddy-draft', question, checkId: draft.checkId });
+    move(1);
+    heading.current?.focus();
+  }
+
   async function launch() {
     if (busy || !actionReady) return;
     setBusy(true);
@@ -81,8 +99,10 @@ export function Workspace({ data }: { data: WorkspaceData }) {
       const result = await post<Run>(`${taskPath}/runs`, {
         checks: priceTask ? [{ id: data.checks[0].id, expectedOrder: order }]
           : data.checks.map(({ id }) => ({ id, expectedCities: choices[id] })),
+        preparation,
       });
       setRun(result);
+      setConclusion('');
       setPublication(undefined);
       setFurthest(2);
       move(2);
@@ -99,7 +119,7 @@ export function Workspace({ data }: { data: WorkspaceData }) {
     setBusy(true);
     setFailure('');
     try {
-      setPublication(await post<Publication>(`${taskPath}/runs/${run.id}/publication`));
+      setPublication(await post<Publication>(`${taskPath}/runs/${run.id}/publication`, { conclusion }));
     } catch (error) {
       setFailure(errorMessage(error));
     } finally {
@@ -127,6 +147,15 @@ export function Workspace({ data }: { data: WorkspaceData }) {
           </a>
         ))}
       </nav>
+      <div className="workflow-tools">
+        <label>Режим проверки <select value={data.buddyMode === 'guide' && mode === 'guide' ? '' : mode ?? ''}
+          onChange={(event) => chooseMode(event.target.value === 'manual' ? 'manual' : event.target.value === 'guide' ? 'guide' : undefined)}>
+          {data.buddyMode === 'model' && <option value="">Buddy · {data.buddyProvider === 'local' ? 'локальная LLM' : 'LLM'}</option>}
+          <option value={data.buddyMode === 'model' ? 'guide' : ''}>Демо-справка</option>
+          <option value="manual">Без Buddy</option>
+        </select></label>
+        {data.identity && <a className="text-link" href="/?records=1">Мои записи <ArrowUpRight size={15} /></a>}
+      </div>
       <nav className="steps" aria-label="Этапы проверки">
         <ol style={{ '--stage-offset': `${stage * 100}%` } as CSSProperties}>{stages.map((label, index) => {
           const current = index === stage;
@@ -139,11 +168,15 @@ export function Workspace({ data }: { data: WorkspaceData }) {
               </button>
             </li>
           );
-        })}</ol>
+        })}
+          <li>{publication ? <a className="review-step" href={publication.url}><span className="step-count" aria-hidden="true">5</span><span>Ревью</span></a>
+            : <button type="button" disabled><span className="step-count" aria-hidden="true">5</span><span>Ревью</span></button>}</li>
+        </ol>
       </nav>
 
-      <div className="workspace-grid">
-        <Buddy workspace={data} openSource={openSource} run={run} collapsible />
+      <div className="workspace-grid" data-has-result={Boolean(run)}>
+        <Buddy workspace={data} openSource={openSource} run={run} collapsible mode={mode}
+          intent={stage === 1 ? 'plan' : undefined} onDraft={busy ? undefined : applyDraft} orderItems={priceTask ? data.orderItems : undefined} />
         <section className="surface work-panel" aria-labelledby="stage-title">
           <span className="visually-hidden" aria-live="polite">
             {busy ? (stage === 1 ? 'Запускаем проверку…' : 'Публикуем…') : publication ? 'Опубликовано' : ''}
@@ -152,6 +185,7 @@ export function Workspace({ data }: { data: WorkspaceData }) {
             <>
               <div className="panel-heading"><h2 id="stage-title" tabIndex={-1} ref={heading}>Что проверяем</h2></div>
               <p className="stage-intro">{task.description}</p>
+              <p className="first-task-note">Первая задача в команде поиска. Подготовь проверку API, зафиксируй результат и передай его наставнику.</p>
               {!priceTask && <div className="brief">
                 <span className="brief-icon"><ListChecks size={22} /></span>
                 <div><h3>Что считаем правильным</h3><p>{task.criterion}</p></div>
@@ -164,6 +198,12 @@ export function Workspace({ data }: { data: WorkspaceData }) {
             <>
               <div className="panel-heading"><h2 id="stage-title" tabIndex={-1} ref={heading}>Подготовить проверку</h2></div>
               <p className="stage-intro">{priceTask ? 'Задай ожидаемую последовательность по тестовой инструкции.' : 'Выбери, какие города должны вернуться в каждом запросе.'}</p>
+              <details className="response-details rule-expectation">
+                <summary>Ожидание по инструкции</summary>
+                <p>{task.criterion}</p>
+                <button type="button" className="text-link" onClick={() => openSource()}>Открыть пункты инструкции <ArrowUpRight size={15} /></button>
+              </details>
+              {preparation && <p className="fallback-note" role="status">Черновик в форме. Проверь ожидание и при необходимости измени его.</p>}
               {priceTask ? <PriceOrderInput check={data.checks[0]} items={data.orderItems} order={order} disabled={busy} onChange={(next) => {
                 setOrder(next);
                 clearResult();
@@ -197,7 +237,9 @@ export function Workspace({ data }: { data: WorkspaceData }) {
               <div className="panel-heading">
                 <h2 id="stage-title" tabIndex={-1} ref={heading}>{stage === 2 || publication ? 'Результат проверки' : 'Предпросмотр'}</h2>
               </div>
-              <Evidence key={run.id} run={run} animate={animateResult} />
+              <div id="result-evidence"><Evidence key={run.id} run={run} animate={animateResult} /></div>
+              {stage === 2 && !publication && <Conclusion key={run.id} run={run} value={conclusion} onChange={setConclusion} openRule={openSource} mode={mode} />}
+              {stage === 3 && !publication && conclusion.trim() && <p className="record-conclusion"><strong>Твой вывод</strong>{conclusion}</p>}
               {stage === 3 && <details className="response-details">
                 <summary>Данные записи для трекера · {task.id} <ChevronDown size={17} className="disclosure" /></summary>
                 <RunContext run={run} />
@@ -229,6 +271,7 @@ export function Workspace({ data }: { data: WorkspaceData }) {
                 )}
               </div>
               {stage === 3 && publication && !priceTask && <NextTask />}
+              {publication && <p className="first-task-note">Запись сохранена. Открой её, чтобы увидеть решение наставника.</p>}
             </>
           )}
         </section>

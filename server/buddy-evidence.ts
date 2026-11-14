@@ -15,7 +15,8 @@ function priceOrder(check: PriceResult, kind: 'expectedOrder' | 'actualOrder') {
   const items = kind === 'actualOrder' ? check.items : check.fixtures;
   return check[kind].slice(0, 12).map((id) => {
     const item = items.find((candidate) => candidate.id === id);
-    return `${id} (${item?.price == null ? 'без цены' : `${item.price} ₽`})`;
+    const knownId = check.fixtures.some((entry) => entry.id === id) ? id : 'другое объявление';
+    return `${knownId} (${item?.price == null ? 'без цены' : `${item.price} ₽`})`;
   }).join(' → ') || 'пусто';
 }
 

@@ -58,7 +58,7 @@ function isListing(value: unknown): value is Listing {
   return isObject(value) && typeof value.id === 'string' && typeof value.title === 'string' && isCity(value.city);
 }
 
-const ruleCities = {
+export const ruleCities = {
   'without-city': [...new Set(listings.map(({ city }) => city))],
   kazan: ['kazan'],
 } satisfies Record<CheckInput['id'], City[]>;

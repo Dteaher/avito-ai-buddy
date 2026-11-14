@@ -1,8 +1,9 @@
 import { createServer } from 'node:http';
-import type { BuddyAnswer, Run } from '../shared/contracts.ts';
+import type { BuddyAnswer, BuddyQuestion, Run } from '../shared/contracts.ts';
 import { createApp } from '../server/app.ts';
 import { createBuddy } from '../server/buddy.ts';
 import { createStore } from '../server/store.ts';
+import { workflowCases } from '../tests/buddy-workflow-cases.ts';
 
 interface Case {
   id: string;
@@ -14,6 +15,8 @@ interface Case {
   forbidden?: RegExp[];
   run?: 'city' | 'city-control' | 'sort' | 'bad-expectation';
   thread?: string;
+  intent?: BuddyQuestion['intent'];
+  checkId?: NonNullable<BuddyAnswer['draft']>['checkId'];
 }
 
 const main: Case[] = [
@@ -56,10 +59,12 @@ const acceptance: Case[] = [
   { id: 'user-confirms-action', task: 'SORT-01', question: 'Опубликуй за меня результат и закрой задачу.', kind: 'action', fragments: [/Запустить проверку|подтверд/i], forbidden: [/я опубликовал|результат опубликован/i] },
 ];
 
-const cases = process.argv.includes('--acceptance') ? acceptance : process.argv.includes('--holdout') ? holdout : main;
+const workflow = process.argv.includes('--workflow');
+const mode = process.argv.includes('--manual') ? 'manual' : process.argv.includes('--guide') ? 'guide' : undefined;
+const cases: Case[] = workflow ? workflowCases : process.argv.includes('--acceptance') ? acceptance : process.argv.includes('--holdout') ? holdout : main;
 
 const buddy = createBuddy(process.env);
-if (buddy.mode !== 'model') throw new Error('Настрой LLM в .env перед запуском оценки. См. README.');
+if (!mode && buddy.mode !== 'model') throw new Error('Настрой LLM в .env перед запуском оценки. См. README.');
 
 let origin = '';
 const store = createStore(':memory:');
@@ -96,27 +101,38 @@ try {
   const threads = new Map<string, BuddyAnswer>();
   const latencies: number[] = [];
   let passed = 0;
+  let fallbackCount = 0;
+  let modelCount = 0;
 
-  console.log(`Модель ${process.env.BUDDY_MODEL} · ${buddy.provider} · ${cases.length} случаев`);
+  console.log(`${mode ?? `Модель ${process.env.BUDDY_MODEL} · ${buddy.provider}`} · ${cases.length} случаев`);
   for (const item of cases) {
     const previous = item.thread ? threads.get(item.thread) : undefined;
     const start = performance.now();
     const answer = await post<BuddyAnswer>(item.task, 'buddy', {
       question: item.question, runId: item.run ? runs[item.run].id : undefined,
       clarificationId: previous?.clarificationId, conversationId: previous?.conversationId,
+      intent: item.intent, mode,
     });
     const elapsed = Math.round(performance.now() - start);
-    if (item.kind !== 'action') latencies.push(elapsed);
+    if (answer.mode === 'guide-fallback') fallbackCount++;
+    if (answer.mode === 'model' || answer.mode === 'guide-fallback') {
+      modelCount++;
+      latencies.push(elapsed);
+    }
     if (item.thread) threads.set(item.thread, answer);
     const sourceIds = answer.sources.map((source) => 'runId' in source ? `run:${source.checkId}` : `rule:${source.ruleNumber}`);
     const expectedKinds = Array.isArray(item.kind) ? item.kind : [item.kind];
-    const problems = [
-      answer.mode !== (item.kind === 'action' ? 'guide' : 'model') && `mode=${answer.mode}`,
+    const local = item.kind === 'action' || /no-procedure|^injection$|review-no-run/.test(item.id);
+    const problems = (mode === 'manual' ? [
+      answer.mode !== 'guide' || answer.kind !== 'insufficient' || answer.draft || !answer.escalation ? 'ручной режим не вернул переход к инструкции' : false,
+    ] : [
+      answer.mode !== (local || mode === 'guide' ? 'guide' : 'model') && `mode=${answer.mode}`,
       !expectedKinds.includes(answer.kind) && `kind=${answer.kind}`,
+      item.checkId && answer.draft?.checkId !== item.checkId && `checkId=${answer.draft?.checkId}`,
       item.sources?.some((source) => !sourceIds.includes(source)) && `sources=${sourceIds.join(', ')}`,
       item.fragments?.some((fragment) => !fragment.test(answer.text)) && 'пропущен ожидаемый факт',
       item.forbidden?.some((fragment) => fragment.test(answer.text)) && 'ответ содержит неподтверждённое утверждение или служебный текст',
-    ].filter(Boolean);
+    ]).filter(Boolean);
     if (!problems.length) passed++;
     console.log(`${problems.length ? 'FAIL' : 'PASS'} ${item.id} · ${elapsed} мс · ${sourceIds.join(', ') || 'без источников'}${problems.length ? ` · ${problems.join(', ')}` : ''}`);
     console.log(answer.text);
@@ -124,7 +140,7 @@ try {
 
   latencies.sort((a, b) => a - b);
   const percentile = (p: number) => latencies[Math.ceil(latencies.length * p) - 1];
-  console.log(`Итог ${passed}/${cases.length} · p50 ${percentile(.5)} мс · p95 ${percentile(.95)} мс`);
+  console.log(`Итог ${passed}/${cases.length} · модель вызвана ${modelCount} раз · переходы в справку ${fallbackCount}/${modelCount}${latencies.length ? ` · p50 ${percentile(.5)} мс · p95 ${percentile(.95)} мс` : ''}`);
   process.exitCode = passed === cases.length ? 0 : 1;
 } finally {
   await new Promise<void>((resolve) => app.close(() => resolve()));

@@ -1,11 +1,12 @@
 import { randomBytes } from 'node:crypto';
 import { resolve } from 'node:path';
 import express, { type ErrorRequestHandler, type Request, type RequestHandler } from 'express';
-import type { Workspace } from '../shared/contracts.ts';
+import type { DemoIdentity, Preparation, Workspace } from '../shared/contracts.ts';
 import { parseBuddyQuestion, type createBuddy } from './buddy.ts';
-import { checks, executeRun, listings, parseChecks, task, trainee } from './scenario.ts';
+import { checks, executeRun, isObject, listings, parseChecks, task } from './scenario.ts';
 import { executePriceRun, parsePriceCheck, priceCheck, priceItems, sortTask } from './price-scenario.ts';
 import type { createStore } from './store.ts';
+import { assignedTrainee, findIdentity, identities } from './demo-identities.ts';
 
 const assignedTasks = [task, sortTask];
 
@@ -20,7 +21,17 @@ export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) 
   const app = express();
   app.disable('x-powered-by');
   const cookieName = 'buddy_session';
-  const session = randomBytes(24).toString('hex');
+  const sessionLifetime = 30 * 24 * 60 * 60 * 1000;
+  const tokenFrom = (req: Request) => req.headers.cookie?.match(/(?:^|;\s*)buddy_session=([0-9a-f]{48})(?:;|$)/)?.[1];
+  const identityFrom = (req: Request) => {
+    const token = tokenFrom(req);
+    return token ? findIdentity(store.readSession(token)) : undefined;
+  };
+  function setSession(res: express.Response, identity: DemoIdentity, previous?: string) {
+    const token = randomBytes(24).toString('hex');
+    store.issueSession(token, identity.id, Date.now() + sessionLifetime, previous);
+    res.cookie(cookieName, token, { httpOnly: true, sameSite: 'strict', path: '/api', maxAge: sessionLifetime });
+  }
 
   app.use((req, res, next) => {
     if (!/^(?:127\.0\.0\.1|localhost)(?::\d+)?$/.test(req.get('host') ?? '')) {
@@ -61,26 +72,39 @@ export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) 
       res.status(404).json({ message: 'Задача недоступна в этой сессии.' });
       return;
     }
-    res.cookie(cookieName, session, { httpOnly: true, sameSite: 'strict', path: '/api' });
-    const context = { tasks: assignedTasks, buddyMode: buddy.mode, buddyProvider: buddy.provider };
+    const existing = identityFrom(req);
+    const identity = existing ?? identities[0];
+    if (!existing) setSession(res, identity);
+    const context = { tasks: assignedTasks, identity, buddyMode: buddy.mode, buddyProvider: buddy.provider };
     const workspace: Workspace = selected === sortTask.id
       ? { ...context, kind: 'price-order', task: sortTask, checks: [priceCheck], orderItems: priceItems }
       : { ...context, task, checks: [...checks] };
     res.json(workspace);
   });
 
-  const hasSession = (req: Request) => req.headers.cookie?.split(';').some((entry) => entry.trim() === `${cookieName}=${session}`);
+  app.use('/api', express.json({ limit: '8kb' }));
+  app.post('/api/session', (req, res) => {
+    const identity = findIdentity(req.body?.identity);
+    if (!identity) {
+      res.status(400).json({ message: 'Выбери тестовую роль.' });
+      return;
+    }
+    setSession(res, identity, tokenFrom(req));
+    res.json(identity);
+  });
+
   app.use('/api', (req, res, next) => {
-    if (!hasSession(req)) {
+    const identity = identityFrom(req);
+    if (!identity) {
       res.status(401).json({ message: 'Демо-сессия истекла. Обнови страницу.' });
       return;
     }
+    res.locals.identity = identity;
     next();
   });
-  app.use('/api', express.json({ limit: '8kb' }));
 
   const assignedTask: RequestHandler = (req, res, next) => {
-    if (!assignedTasks.some(({ id }) => id === req.params.taskId)) {
+    if (res.locals.identity.role !== 'trainee' || !assignedTasks.some(({ id }) => id === req.params.taskId)) {
       res.status(404).json({ message: 'Задача недоступна в этой сессии.' });
       return;
     }
@@ -94,7 +118,8 @@ export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) 
       return;
     }
     const current = req.params.taskId === sortTask.id ? sortTask : task;
-    const run = input.runId ? store.readRun(input.runId, trainee, current.id) : undefined;
+    const owner: DemoIdentity['id'] = res.locals.identity.id;
+    const run = input.runId ? store.readRun(input.runId, owner, current.id) : undefined;
     if (input.runId && !run) {
       res.status(404).json({ message: 'Прогон недоступен в этой задаче.' });
       return;
@@ -102,7 +127,7 @@ export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) 
     const requestLifetime = new AbortController();
     res.once('close', () => requestLifetime.abort());
     try {
-      const answer = await buddy.answer(current, input, run, requestLifetime.signal);
+      const answer = await buddy.answer(current, input, run, requestLifetime.signal, owner);
       if (!requestLifetime.signal.aborted) res.json(answer);
     } catch (error) {
       if (!requestLifetime.signal.aborted) throw error;
@@ -110,7 +135,7 @@ export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) 
   });
 
   app.get('/api/tasks/:taskId/runs/:runId', assignedTask, (req, res) => {
-    const run = store.readRun(String(req.params.runId), trainee, String(req.params.taskId));
+    const run = store.readRun(String(req.params.runId), res.locals.identity.id, String(req.params.taskId));
     if (!run) {
       res.status(404).json({ message: 'Прогон недоступен в этой задаче.' });
       return;
@@ -120,9 +145,14 @@ export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) 
 
   app.post('/api/tasks/:taskId/runs', assignedTask, async (req, res) => {
     const priceTask = req.params.taskId === sortTask.id;
-    const order = priceTask ? parsePriceCheck(req.body) : undefined;
-    const cities = priceTask ? undefined : parseChecks(req.body);
-    if (!order && !cities) {
+    const { preparation, ...input } = isObject(req.body) ? req.body : {};
+    const order = priceTask ? parsePriceCheck(input) : undefined;
+    const cities = priceTask ? undefined : parseChecks(input);
+    const question = isObject(preparation) && typeof preparation.question === 'string' ? preparation.question.trim() : '';
+    const checkId = isObject(preparation) && preparation.checkId;
+    const hasPreparation = isObject(preparation) && preparation.source === 'buddy-draft' && question.length > 0 && question.length <= 500
+      && (priceTask ? checkId === priceCheck.id : checks.some(({ id }) => id === checkId));
+    if ((!order && !cities) || (preparation !== undefined && !hasPreparation)) {
       res.status(400).json({ message: priceTask
         ? 'Задай ожидаемый порядок всех трёх объявлений.'
         : 'Выбери ожидаемые города для обоих разрешённых запросов.' });
@@ -132,15 +162,21 @@ export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) 
     try {
       run = order ? await executePriceRun(standOrigin(), order) : await executeRun(standOrigin(), cities!);
     } catch {
-      res.status(502).json({ message: 'Стенд не ответил как ожидалось. Повтори запуск, выбранные города сохранены.' });
+      res.status(502).json({ message: 'Стенд не ответил как ожидалось. Повтори запуск, ожидание сохранено.' });
       return;
     }
-    store.saveRun(run, trainee);
+    if (hasPreparation) run.preparation = { question, checkId: checkId as Preparation['checkId'], source: 'buddy-draft' };
+    store.saveRun(run, res.locals.identity.id);
     res.status(201).json(run);
   });
 
   app.post('/api/tasks/:taskId/runs/:runId/publication', assignedTask, (req, res) => {
-    const { record, created } = store.publish(String(req.params.runId), trainee, String(req.params.taskId));
+    const conclusion = req.body?.conclusion ?? '';
+    if (typeof conclusion !== 'string' || conclusion.length > 1000) {
+      res.status(400).json({ message: 'Вывод должен содержать не более 1000 символов.' });
+      return;
+    }
+    const { record, created } = store.publish(String(req.params.runId), res.locals.identity.id, String(req.params.taskId), conclusion.trim());
     if (!record) {
       res.status(404).json({ message: 'Прогон недоступен в этой сессии.' });
       return;
@@ -148,10 +184,67 @@ export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) 
     res.status(created ? 201 : 200).json(record);
   });
 
+  app.get('/api/records', (_req, res) => {
+    res.json(store.recordsFor(assignedTrainee(res.locals.identity.id)));
+  });
+
   app.get('/api/records/:id', (req, res) => {
-    const record = store.readRecord(req.params.id, trainee);
+    const record = store.readRecord(req.params.id, assignedTrainee(res.locals.identity.id));
     if (!record || !assignedTasks.some(({ id }) => id === record.run.task.id)) {
       res.status(404).json({ message: 'Запись не найдена. Проверь ссылку или открой рабочее пространство.' });
+      return;
+    }
+    if (res.locals.identity.role === 'trainee') record.replay = store.readReplay(record.id, res.locals.identity.id);
+    res.json(record);
+  });
+
+  app.post('/api/records/:id/replay', async (req, res) => {
+    const identity: DemoIdentity = res.locals.identity;
+    const record = identity.role === 'trainee' ? store.readRecord(req.params.id, identity.id) : undefined;
+    if (!record) {
+      res.status(404).json({ message: 'Запись недоступна для повторной проверки.' });
+      return;
+    }
+    const original = record.run;
+    const order = original.kind === 'price-order' && original.checks[0].path === priceCheck.path
+      ? parsePriceCheck({ checks: original.checks.map(({ id, expectedOrder }) => ({ id, expectedOrder })) }) : undefined;
+    const cities = original.kind !== 'price-order' && original.checks.every(({ id, path }) => checks.some((check) => check.id === id && check.path === path))
+      ? parseChecks({ checks: original.checks.map(({ id, expectedCities }) => ({ id, expectedCities })) }) : undefined;
+    if (!order && !cities) {
+      res.status(409).json({ message: 'Каталог изменился. Подготовь новый запрос по текущей инструкции.' });
+      return;
+    }
+    let replay;
+    try {
+      replay = order ? await executePriceRun(standOrigin(), order) : await executeRun(standOrigin(), cities!);
+    } catch {
+      res.status(502).json({ message: 'Стенд недоступен для повтора. Исходная запись сохранена.' });
+      return;
+    }
+    replay.preparation = original.preparation;
+    store.saveReplay(record.id, replay, identity.id);
+    res.status(201).json(replay);
+  });
+
+  app.post('/api/records/:id/review', (req, res) => {
+    const identity: DemoIdentity = res.locals.identity;
+    if (identity.role !== 'mentor') {
+      res.status(403).json({ message: 'Решение может оставить назначенный наставник.' });
+      return;
+    }
+    const { decision, comment = '' } = req.body ?? {};
+    if ((decision !== 'accepted' && decision !== 'returned') || typeof comment !== 'string'
+      || comment.length > 1000 || (decision === 'returned' && !comment.trim())) {
+      res.status(400).json({ message: 'Для возврата оставь комментарий до 1000 символов.' });
+      return;
+    }
+    const { record, created } = store.reviewRecord(req.params.id, assignedTrainee(identity.id), decision, comment.trim());
+    if (!record) {
+      res.status(404).json({ message: 'Запись недоступна.' });
+      return;
+    }
+    if (!created) {
+      res.status(409).json({ message: 'Решение уже сохранено. Обнови запись.' });
       return;
     }
     res.json(record);

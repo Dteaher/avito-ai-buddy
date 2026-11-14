@@ -37,6 +37,14 @@ interface WorkspaceBase {
   tasks: Task[];
   buddyMode: 'guide' | 'model';
   buddyProvider?: 'local' | 'remote';
+  identity?: DemoIdentity;
+}
+
+export type DemoIdentityId = 'demo-trainee' | 'demo-trainee-b' | 'demo-mentor';
+export interface DemoIdentity {
+  id: DemoIdentityId;
+  name: string;
+  role: 'trainee' | 'mentor';
 }
 
 export type Workspace = WorkspaceBase & (
@@ -89,6 +97,13 @@ interface RunBase {
   id: string;
   task: Task;
   checkedAt: string;
+  preparation?: Preparation;
+}
+
+export interface Preparation {
+  question: string;
+  checkId: DraftCheck['id'];
+  source: 'buddy-draft';
 }
 
 export type CityRun = RunBase & { kind?: never; checks: CheckResult[] };
@@ -100,6 +115,23 @@ export interface Publication {
   url: string;
   publishedAt: string;
   run: Run;
+  conclusion?: string;
+  review?: { decision: 'accepted' | 'returned'; comment: string; reviewedAt: string };
+  replay?: Run;
+}
+
+export interface RecordListItem {
+  id: string;
+  taskId: string;
+  publishedAt: string;
+  decision: 'accepted' | 'returned' | null;
+}
+
+export type DraftCheck = CheckInput | { id: 'price-asc'; expectedOrder: string[] };
+export interface CheckDraft {
+  checkId: DraftCheck['id'];
+  path: string;
+  checks: DraftCheck[];
 }
 
 export interface BuddyQuestion {
@@ -107,6 +139,8 @@ export interface BuddyQuestion {
   clarificationId?: string;
   conversationId?: string;
   runId?: string;
+  intent?: 'plan' | 'review';
+  mode?: 'guide' | 'manual';
 }
 
 export interface RunEvidenceSource {
@@ -118,11 +152,14 @@ export interface RunEvidenceSource {
 export type BuddySource = { instructionId: string; ruleNumber: number } | RunEvidenceSource;
 
 export interface BuddyAnswer {
-  kind: 'guidance' | 'clarification' | 'insufficient' | 'action';
+  kind: 'guidance' | 'clarification' | 'insufficient' | 'action' | 'draft' | 'feedback';
   text: string;
   mode: Workspace['buddyMode'] | 'guide-fallback';
   sources: BuddySource[];
   clarificationId?: string;
   conversationId?: string;
   fallbackReason?: 'unavailable' | 'invalid-response';
+  draft?: CheckDraft;
+  facts?: string[];
+  escalation?: string;
 }

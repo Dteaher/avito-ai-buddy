@@ -7,7 +7,7 @@ const port = Number(process.env.PORT ?? 3001);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT должен быть от 1 до 65535');
 
 const origin = `http://127.0.0.1:${port}`;
-const store = createStore(resolve('.data', 'buddy.sqlite'));
+const store = createStore(process.env.BUDDY_DB_PATH ?? resolve('.data', 'buddy.sqlite'));
 const app = createApp({ store, standOrigin: () => origin, buddy: createBuddy(process.env), staticDir: resolve('dist') });
 const server = app.listen(port, '127.0.0.1', () => console.log(`AI-buddy · ${origin}`));
 

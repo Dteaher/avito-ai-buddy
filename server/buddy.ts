@@ -6,6 +6,7 @@ import { generateReply, ModelResponseError, readProvider, type DialogueMessage, 
 import { priceIntent, priceReplies } from './price-guide.ts';
 import { sortTask } from './price-scenario.ts';
 import { isObject } from './scenario.ts';
+import { draftFor, escalation, guideFeedback, guidePlan, statesRequiredPriceOrder, workflowContract } from './buddy-workflow.ts';
 
 const clarificationLifetime = 10 * 60 * 1000;
 const conversationLifetime = 30 * 60 * 1000;
@@ -16,9 +17,13 @@ const contextKeys = ['clarificationId', 'conversationId', 'runId'] as const;
 
 export function parseBuddyQuestion(body: unknown): BuddyQuestion | undefined {
   if (!isObject(body)) return;
-  const { question, ...context } = body;
+  const { question, intent, mode, ...context } = body;
   if (typeof question !== 'string' || !question.trim() || question.trim().length > 500) return;
   const input: BuddyQuestion = { question: question.trim() };
+  if (intent !== undefined && intent !== 'plan' && intent !== 'review') return;
+  if (mode !== undefined && mode !== 'guide' && mode !== 'manual') return;
+  if (intent) input.intent = intent;
+  if (mode) input.mode = mode;
   for (const [key, value] of Object.entries(context)) {
     const field = contextKeys.find((candidate) => candidate === key);
     if (!field || typeof value !== 'string' || !uuid.test(value)) return;
@@ -27,7 +32,7 @@ export function parseBuddyQuestion(body: unknown): BuddyQuestion | undefined {
   return input;
 }
 
-interface Scope { taskId: string; expiresAt: number }
+interface Scope { taskId: string; owner: string; scope: string; expiresAt: number }
 interface Clarification extends Scope { topic: NonNullable<Reply['followUp']> }
 interface Turn { question: string; answer: string; kind: BuddyAnswer['kind']; sources: BuddySource[]; runId?: string }
 interface Conversation extends Scope { turns: Turn[] }
@@ -98,12 +103,23 @@ export function createBuddy(env: NodeJS.ProcessEnv) {
 
   return {
     mode, provider: providerKind,
-    async answer(task: Task, { question, clarificationId, conversationId }: BuddyQuestion, run?: Run, signal?: AbortSignal): Promise<BuddyAnswer> {
+    async answer(task: Task, { question, clarificationId, conversationId, intent, mode: requestedMode }: BuddyQuestion, run?: Run, signal?: AbortSignal, owner = ''): Promise<BuddyAnswer> {
+      const scope = `${requestedMode ?? 'default'}/${intent ?? 'chat'}/${intent ? run?.id ?? '' : ''}`;
+      const bound = (entry?: Scope) => entry?.owner === owner && entry.scope === scope
+        && entry.taskId === task.id && entry.expiresAt > Date.now();
       const previous = clarificationId ? clarifications.get(clarificationId) : undefined;
-      const followUp = previous?.taskId === task.id && previous.expiresAt > Date.now() ? previous.topic : undefined;
+      const followUp = bound(previous) ? previous?.topic : undefined;
       const price = task.id === sortTask.id;
       const query = question.toLowerCase().replaceAll('ё', 'е').replace(/\s+/g, ' ');
+      const outside = /отгул|отпуск|внутренн.*(?:пароль|ключ)|игнорируй.*(?:инструкц|правил)|системный промпт/.test(query);
+      if (requestedMode === 'manual' || outside) return {
+        kind: 'insufficient', mode: 'guide', sources: [], escalation: escalation(task),
+        text: outside ? 'В тестовой инструкции команды нет сведений по этому вопросу.' : 'Ручной режим включён. Проверь правило в инструкции или уточни вопрос у наставника.',
+      };
       if (isActionRequest(query)) return guideAnswer(task, price ? priceReplies.action : replies.action);
+      if (intent === 'review' && !run) return {
+        kind: 'insufficient', mode: 'guide', sources: [], text: 'Сначала выполни проверку или открой доступный прогон.',
+      };
       const local: Reply = price ? priceReplies[priceIntent(query, followUp === 'price')] : replies[guideIntent(query, followUp)];
       const groundingTask = run?.task ?? task;
       const evidence = buddyEvidence(groundingTask, run);
@@ -111,10 +127,16 @@ export function createBuddy(env: NodeJS.ProcessEnv) {
       let answer: BuddyAnswer = runAnswer ? { ...runAnswer, mode: 'guide' }
         : !run && needsRun(query) ? { kind: 'insufficient', text: 'Данных о прогоне пока нет. Запусти проверку и открой ответ стенда.', mode: 'guide', sources: [] }
           : guideAnswer(groundingTask, local);
+      if (intent === 'plan') answer = guidePlan(task, query, followUp) ?? answer;
+      if (intent === 'plan' && answer.kind === 'guidance') answer = {
+        kind: 'clarification', text: 'Какой разрешённый запрос хочешь проверить? Уточни параметр запроса или открой ручную форму.',
+        mode: 'guide', sources: [],
+      };
+      if (intent === 'review' && run) answer = guideFeedback(run, query);
 
-      if (provider) {
+      if (provider && !requestedMode) {
         const existing = conversationId ? conversations.get(conversationId) : undefined;
-        const active = existing?.taskId === task.id && existing.expiresAt > Date.now() ? existing : undefined;
+        const active = bound(existing) ? existing : undefined;
         const id = active ? conversationId! : randomUUID();
         const turns = active?.turns.filter((turn) => !turn.runId || turn.runId === run?.id) ?? [];
         const selectedChecks = runAnswer?.sources.filter((source) => 'runId' in source);
@@ -130,15 +152,27 @@ export function createBuddy(env: NodeJS.ProcessEnv) {
           kazan: 'Buddy уточнил, был ли задан фильтр по Казани. Ответ «нет» сам по себе не означает, что фильтра не было.',
         };
         try {
-          const plan = planReply(query, answer, local, price, relatedTurns.at(-1), run);
+          const plan = intent ? undefined : planReply(query, answer, local, price, relatedTurns.at(-1), run);
           const relatedRules = selectedChecks?.flatMap(({ checkId }) => checkId === 'price-asc' ? ['rule:1', 'rule:2']
             : [checkId === 'without-city' ? 'rule:1' : 'rule:2']);
           const modelEvidence = selectedIds ? new Map([...evidence].filter(([id]) => selectedIds.has(id)
             || id === 'rule:3' || relatedRules?.includes(id))) : evidence;
-          const generated = await generateReply(provider, {
-            task: groundingTask, question, evidence: modelEvidence, history, followUp: followUp ? hints[followUp] : undefined, signal, plan,
+          const workflow = intent ? workflowContract(groundingTask, intent, run, answer) : undefined;
+          const timeout = workflow ? AbortSignal.timeout(provider.timeout) : undefined;
+          const modelSignal = signal && timeout ? AbortSignal.any([signal, timeout]) : timeout ?? signal;
+          const generate = () => generateReply(provider, {
+            task: groundingTask, question, evidence: intent ? evidence : modelEvidence, history, followUp: followUp && !history.length ? hints[followUp] : undefined,
+            signal: modelSignal, plan, workflow,
           });
-          answer = { ...generated, mode: 'model' };
+          const { checkId, reviewClaims, ...generated } = await generate().catch((error: unknown) => {
+            if (workflow && error instanceof ModelResponseError && !modelSignal?.aborted) return generate();
+            throw error;
+          });
+          answer = {
+            ...(generated.kind === 'feedback' && run ? guideFeedback(run, query, reviewClaims) : generated),
+            ...(checkId === 'price-asc' && answer.kind === 'draft' && statesRequiredPriceOrder(query) ? { text: answer.text } : {}),
+            mode: 'model', ...(checkId ? { draft: draftFor(task, checkId) } : {}),
+          };
         } catch (error) {
           signal?.throwIfAborted();
           answer = { ...answer, mode: 'guide-fallback', fallbackReason: error instanceof ModelResponseError ? 'invalid-response' : 'unavailable' };
@@ -146,16 +180,18 @@ export function createBuddy(env: NodeJS.ProcessEnv) {
         signal?.throwIfAborted();
         answer.conversationId = id;
         remember(conversations, id, {
-          taskId: task.id, expiresAt: Date.now() + conversationLifetime,
+          taskId: task.id, owner, scope, expiresAt: Date.now() + conversationLifetime,
           turns: [...turns, { question, answer: answer.text, kind: answer.kind, sources: answer.sources, runId: run?.id }].slice(-maxTurns),
         });
       }
 
-      if (answer.kind === 'clarification' && answer.mode !== 'model' && local.followUp) {
+      const topic = intent === 'plan' && !price ? 'filter' : local.followUp;
+      if (answer.kind === 'clarification' && (answer.mode !== 'model' || intent) && topic) {
         const id = randomUUID();
-        remember(clarifications, id, { taskId: task.id, expiresAt: Date.now() + clarificationLifetime, topic: local.followUp });
+        remember(clarifications, id, { taskId: task.id, owner, scope, expiresAt: Date.now() + clarificationLifetime, topic });
         answer.clarificationId = id;
       }
+      if (answer.kind === 'insufficient' && !needsRun(query)) answer.escalation = escalation(task);
       return answer;
     },
   };

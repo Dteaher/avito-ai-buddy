@@ -27,6 +27,8 @@ export const priceCheck: PriceCheck = {
   id: 'price-asc', label: 'По возрастанию цены', path: '/demo/search?sort=price_asc', parameter: 'sort=price_asc',
 };
 
+export const ruleOrder = priceItems.toSorted((a, b) => (a.price ?? Infinity) - (b.price ?? Infinity)).map(({ id }) => id);
+
 export function parsePriceCheck(body: unknown): string[] | undefined {
   if (!isObject(body) || Object.keys(body).length !== 1 || !Array.isArray(body.checks) || body.checks.length !== 1) return;
   const input: unknown = body.checks[0];
@@ -50,7 +52,6 @@ export async function executePriceRun(origin: string, expectedOrder: string[]): 
   const { items, rawBody, status } = await fetchStand(origin, priceCheck.path, AbortSignal.timeout(5000));
   if (!items.every(isPriceListing)) throw new Error('Invalid price listings');
   const actualOrder = items.map(({ id }) => id);
-  const ruleOrder = priceItems.toSorted((a, b) => (a.price ?? Infinity) - (b.price ?? Infinity)).map(({ id }) => id);
   const sameItems = actualOrder.length === expectedOrder.length && expectedOrder.every((id) => actualOrder.includes(id));
   return {
     kind: 'price-order', id: randomUUID(), task: sortTask, checkedAt: new Date().toISOString(),

@@ -22,6 +22,7 @@ const publication: Publication = { id: 'QA-demo', url: '/records/QA-demo', run, 
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  sessionStorage.clear();
   window.history.replaceState(null, '', '/');
 });
 
@@ -104,6 +105,64 @@ describe('First Check workspace', () => {
     expect(screen.getByText(/на 1-м месте вместо 3-го/)).toBeTruthy();
     const sent = mock.mock.calls.find(([url]) => url === '/api/tasks/SORT-01/runs');
     expect(JSON.parse(String(sent?.[1]?.body))).toEqual({ checks: [{ id: 'price-asc', expectedOrder }] });
+    expect(mock.mock.calls.some(([url]) => url.endsWith('/buddy'))).toBe(false);
+  });
+
+  it('fills an editable draft and sends the conclusion only after the trainee confirms', async () => {
+    const mock = api({ answers: [{
+      kind: 'draft', mode: 'model', text: 'Без фильтра по правилу нужна и Самара.',
+      sources: [{ instructionId: task.instruction.id, ruleNumber: 1 }],
+      draft: { checkId: 'without-city', path: checks[0].path, checks: [
+        { id: 'without-city', expectedCities: ['kazan', 'samara'] }, { id: 'kazan', expectedCities: ['kazan'] },
+      ] },
+    }, {
+      kind: 'feedback', mode: 'model', text: 'В выводе нужно указать отсутствующую Самару.',
+      facts: ['Без фильтра Самара отсутствует.'],
+      sources: [{ runId: run.id, checkId: 'without-city', label: 'Без города' }],
+    }] });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole('button', { name: 'Подготовить проверку' }));
+    await user.type(screen.getByRole('textbox', { name: 'Спросить Buddy' }), 'Без фильтра жду Казань{Enter}');
+    await user.click(await screen.findByRole('button', { name: 'Использовать черновик' }));
+    expect(mock.mock.calls.some(([url]) => url.endsWith('/runs'))).toBe(false);
+    const primary = screen.getByRole('group', { name: 'Основной запрос' });
+    await user.click(within(primary).getByRole('button', { name: 'Самара' }));
+    await user.click(screen.getByRole('button', { name: 'Запустить проверку' }));
+    const launch = mock.mock.calls.find(([url]) => url.endsWith('/runs'))!;
+    expect(JSON.parse(String(launch[1]?.body))).toMatchObject({
+      checks: [{ id: 'without-city', expectedCities: ['kazan'] }, { id: 'kazan', expectedCities: ['kazan'] }],
+      preparation: { source: 'buddy-draft', question: 'Без фильтра жду Казань' },
+    });
+    const conclusion = await screen.findByRole('textbox', { name: 'Твой вывод' });
+    await user.type(conclusion, 'Всё в порядке');
+    await user.click(screen.getByRole('button', { name: 'Сверить вывод с Buddy' }));
+    await screen.findByText('В выводе нужно указать отсутствующую Самару.');
+    expect(mock.mock.calls.some(([url]) => url.endsWith('/publication'))).toBe(false);
+    await user.clear(conclusion);
+    await user.type(conclusion, 'Без фильтра отсутствует Самара');
+    await user.click(screen.getByRole('button', { name: 'Опубликовать в задачу' }));
+    await user.click(screen.getByRole('button', { name: 'Подтвердить публикацию' }));
+    await screen.findByRole('link', { name: /Открыть запись/ });
+    const published = mock.mock.calls.find(([url]) => url.endsWith('/publication'))!;
+    expect(JSON.parse(String(published[1]?.body))).toEqual({ conclusion: 'Без фильтра отсутствует Самара' });
+  });
+
+  it('keeps the manual workflow available and makes no Buddy request', async () => {
+    const mock = api();
+    const user = userEvent.setup();
+    render(<App />);
+    await user.selectOptions(await screen.findByRole('combobox', { name: 'Режим проверки' }), 'manual');
+    expect(screen.queryByRole('textbox', { name: 'Спросить Buddy' })).toBeNull();
+    const manual = screen.getByRole('complementary', { name: 'Без Buddy' });
+    expect(within(manual).getByText('Вопрос наставнику')).toBeTruthy();
+    const launch = await prepare(user);
+    await user.click(launch);
+    expect(await screen.findByRole('textbox', { name: 'Твой вывод' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Сверить вывод с Buddy' })).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Опубликовать в задачу' }));
+    await user.click(screen.getByRole('button', { name: 'Подтвердить публикацию' }));
+    await screen.findByRole('link', { name: /Открыть запись/ });
     expect(mock.mock.calls.some(([url]) => url.endsWith('/buddy'))).toBe(false);
   });
   it('links the source, compares both responses and publishes after confirmation', async () => {
