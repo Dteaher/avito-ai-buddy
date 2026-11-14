@@ -80,6 +80,13 @@ select:focus-visible, textarea:focus-visible { outline: 3px solid #7d43e3; outli
 .record-list li:last-child { border-bottom: 0; }
 @media (max-width: 400px) { .identity-picker { gap: 5px; } }
 @media (max-width: 540px) { .replay-summary { grid-template-columns: 1fr; } }
+@media (max-width: 355px) {
+  .masthead { gap: 8px; }
+  .masthead .brand { font-size: 20px; white-space: nowrap; }
+  .masthead .identity-picker { font-size: 12px; white-space: nowrap; }
+  .workspace .order-options { grid-template-columns: 1fr; }
+  .workspace .order-option { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 9px; }
+}
 
 .hero { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 31px 0 23px; }
 .task-key { color: #40536d; font-size: 12px; font-weight: 710; letter-spacing: .055em; }
