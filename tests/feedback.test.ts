@@ -45,6 +45,7 @@ describe('Review of conclusions against real snapshots', () => {
     'Не берусь утверждать, что карточку без ценника потеряли.',
     'Мне сказали, что объявление без цены исчезло.',
     'Карточка без цены пропала?!',
+    'Я не думаю, что карточка без цены пропала.',
   ])('shows observations rather than scoring %s', (question) => {
     const answer = guideFeedback(sortFixed, question.toLowerCase(), ['null-missing', 'sort-correct']);
     expect(answer.verdicts?.map(({ status }) => status)).toEqual(['observation']);
@@ -56,6 +57,10 @@ describe('Review of conclusions against real snapshots', () => {
       ['null-missing', 'not-numeric-ascending', 'sort-correct']);
     expect(answer.verdicts?.map(({ status }) => status)).toEqual(['confirmed', 'observation']);
     expect(answer.text).toMatch(/числовые цены действительно возрастают/i);
+  });
+  it('treats quotation marks around an item label as part of the assertion', () => {
+    const answer = guideFeedback(sortFixed, 'карточка «без цены» последняя');
+    expect(answer.verdicts?.map(({ status }) => status)).toEqual(['confirmed']);
   });
   it('keeps doubt and control observations scoped in SEARCH-01', () => {
     const answer = guideFeedback(searchFixed, 'не уверен, что самара пропала без фильтра. в контроле самары нет.',

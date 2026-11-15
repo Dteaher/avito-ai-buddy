@@ -102,7 +102,11 @@ const unclear = 'Уточни, что именно утверждаешь об �
 
 function reviewClauses(query: string) {
   // Quoted punctuation cannot terminate the surrounding reported statement.
-  const quoted = query.replace(/«[^»]+»|“[^”]+”|"[^"]+"/g, (text) => `цитата ${text.replace(/[.!?;,:]/g, ' ')}`);
+  const quoted = query.replace(/«[^»]+»|“[^”]+”|"[^"]+"/g, (text, offset: number) => {
+    const before = query.slice(0, offset).trimEnd();
+    const standalone = !before || /[.!?;:]$/.test(before);
+    return `${standalone ? 'цитата ' : ''}${text.slice(1, -1).replace(/[.!?;,:]/g, ' ')}`;
+  });
   return quoted.split(/(?<=[.!?;])\s+|\n+/).flatMap((sentence) => {
     const question = /\?[.!?]*$/.test(sentence.trimEnd());
     const parts = /^\s*если\s/.test(sentence) ? [sentence] : sentence.split(/,\s*(?:но|а|зато|однако)\s+/);
@@ -110,7 +114,7 @@ function reviewClauses(query: string) {
       const clause = text.trim();
       const qualified = question
         || /(?:^|[^\p{L}])(?:цитата|если|возможно|наверное|похоже|может\s+быть|вряд\s+ли|кажется|предполагаю|сомневаюсь|есть\s+ли)(?=$|[^\p{L}])/u.test(clause)
-        || /не\s+(?:\S+\s+){0,2}(?:уверен|знаю|утверждаю|говорю|скажу|сказать|утверждать|подтверд|доказано)/.test(clause)
+        || /не\s+(?:\S+\s+){0,2}(?:уверен|знаю|думаю|считаю|утверждаю|говорю|скажу|сказать|утверждать|подтверд|доказано)/.test(clause)
         || /(?:коллег|наставник|автор|в тикете|в отчете).{0,45}(?:написал|пишет|сказал|считает|утвержда|указал|говорит)|(?:написал|сказал|утвержда).{0,25}(?:коллег|наставник|автор)/.test(clause)
         || /(?:сказали|написали|сообщили),?\s+что|(?:^|\s)по словам\s/.test(clause);
       return { clause, qualified };
