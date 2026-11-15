@@ -2,7 +2,7 @@
 
 Локальный прототип для кейса Авито на Hack&Change 2026. Backend-стажёр проверяет API поиска по инструкции команды, фиксирует наблюдение и передаёт воспроизводимую запись наставнику. Buddy помогает спланировать проверку и сверяет отдельные утверждения с ответом стенда. Наставник может запросить исправление или повторить запрос по опубликованной записи.
 
-![SORT-01. При HTTP 200 объявление без цены оказалось первым вместо последнего.](docs/screenshots/first-check-hardening.png)
+![SORT-01. Сравнение исходного ответа и повтора, третья позиция карточки и наблюдение Buddy.](docs/screenshots/first-check-evidence.png)
 
 ## Запуск
 
@@ -64,6 +64,7 @@ pnpm eval:hardening
 pnpm eval:hardening --guide-only
 pnpm eval:hardening --audit
 pnpm eval:hardening --evidence
+pnpm eval:hardening --evidence-fresh
 ```
 
 | Требование | Где проверить |
