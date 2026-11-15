@@ -8,6 +8,7 @@ import { createApp } from '../server/app.ts';
 import { createBuddy } from '../server/buddy.ts';
 import { readProvider } from '../server/buddy-model.ts';
 import { createStore } from '../server/store.ts';
+import { priceObservations, summarizeRun } from '../shared/run-summary.ts';
 import { buddyCases } from './buddy-cases.ts';
 
 const task = '/api/tasks/SEARCH-01';
@@ -400,6 +401,40 @@ describe('SEARCH-01 over HTTP', () => {
     }
   });
 
+  it('checks actual prices and preserves three separate facts in the recorded SORT-01 evidence', async () => {
+    const sort = '/api/tasks/SORT-01';
+    const ids = ['ad-201', 'ad-202', 'ad-203'];
+    let items: { id: string; title: string; price: number | null }[] = [];
+    const fixture = createServer((_req, res) => res.end(JSON.stringify({ items })));
+    standBase = await listen(fixture);
+    try {
+      const cases = [
+        { data: [[0, 1200], [1, 900], [2, null]], matches: false, sameItems: true, followsRule: false },
+        { data: [[1, 300], [0, 500], [2, null]], matches: false, sameItems: true, followsRule: true },
+        { data: [[0, 500], [1, 500], [2, null]], matches: false, sameItems: true, followsRule: true },
+        { data: [[1, 500], [0, 500], [2, null]], matches: false, sameItems: true, followsRule: true },
+        { data: [[0, 500], [1, 900], [2, 1000]], matches: false, sameItems: true, followsRule: true },
+        { data: [[0, 500], [1, 900]], matches: false, sameItems: false, followsRule: true },
+        { data: [[0, 500], [1, 900], [2, null], [3, null]], matches: false, sameItems: false, followsRule: true },
+        { data: [[2, null], [0, 500], [1, 900]], matches: false, sameItems: true, followsRule: false },
+      ] as const;
+      for (const { data, matches, sameItems, followsRule } of cases) {
+        items = data.map(([index, price]) => ({ id: ids[index] ?? 'extra', title: 'Тестовая карточка', price }));
+        const reply = await post(`${sort}/runs`, { checks: [{ id: 'price-asc', expectedOrder: ids }] });
+        expect(reply.status).toBe(201);
+        const result = await reply.json();
+        expect(result.checks[0]).toMatchObject({ matches, sameItems });
+        expect(priceObservations(result.checks[0]).followsRule).toBe(followsRule);
+        const buddy = await (await post(`${sort}/buddy`, { question: 'Сортировка правильная.', intent: 'review', runId: result.id, mode: 'guide' })).json();
+        expect(buddy.verdicts[0].status).toBe(followsRule ? 'confirmed' : 'refuted');
+        const saved = await (await post(`${sort}/runs/${result.id}/publication`)).json();
+        expect(buddy.facts).toEqual(summarizeRun(saved.run));
+      }
+    } finally {
+      await new Promise<void>((resolve) => fixture.close(() => resolve()));
+    }
+  });
+
   it('compares a custom expectation independently from the rule', async () => {
     const response = await run([
       { id: 'without-city', expectedCities: ['kazan'] },
@@ -645,7 +680,7 @@ describe('SEARCH-01 over HTTP', () => {
     const sortTask = '/api/tasks/SORT-01';
     const sortRun = await (await post(`${sortTask}/runs`, { checks: [{ id: 'price-asc', expectedOrder: ['ad-201', 'ad-202', 'ad-203'] }] })).json();
     const sortAnswer = await (await post(`${sortTask}/buddy`, { question: 'Что показал прогон?', runId: sortRun.id })).json();
-    expect(sortAnswer).toMatchObject({ kind: 'guidance', text: expect.stringContaining('Фактический — ad-203 (без цены) → ad-201 (500 ₽) → ad-202 (900 ₽)') });
+    expect(sortAnswer).toMatchObject({ kind: 'guidance', text: expect.stringContaining('Стенд вернул: без цены → 500 ₽ → 900 ₽') });
     expect(sortAnswer.sources).toContainEqual({ runId: sortRun.id, checkId: 'price-asc', label: 'По возрастанию цены' });
   });
 

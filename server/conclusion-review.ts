@@ -1,5 +1,5 @@
 import { cities, type CheckResult, type ClaimVerdict, type PriceResult, type Run } from '../shared/contracts.ts';
-import { priceObservations } from '../shared/run-summary.ts';
+import { explainPriceRule, priceObservations } from '../shared/run-summary.ts';
 
 export const priceClaims = {
   'numeric-ascending': 'числовые цены возрастают',
@@ -21,17 +21,18 @@ function containsSame<T>(actual: T[], expected: T[]) {
 }
 
 function priceFacts(check: PriceResult) {
-  const { ascending, position, required, followsRule: order } = priceObservations(check);
+  const facts = priceObservations(check);
+  const { ascending, position, followsRule: order } = facts;
   const unpricedFact = position
-    ? `Карточка без цены присутствует на ${position}-м месте. Пункт 2 требует ${required}-е место.`
-    : 'Карточка без цены отсутствует. Пункт 2 требует сохранить её в выдаче.';
+    ? `Карточка без цены присутствует на ${position}-м месте. Пункт 2 требует ставить такие карточки после карточек с ценой.`
+    : 'В ответе отсутствует исходная карточка без цены либо у неё появилась цена. Изменение состава и цен показано отдельно.';
   const numberFact = ascending === undefined ? 'В ответе меньше двух числовых цен.'
     : ascending ? 'Числовые цены действительно возрастают.' : 'Числовые цены идут с нарушением возрастания.';
   return {
     'numeric-ascending': [ascending, numberFact],
-    'sort-correct': [order, `${order ? 'Порядок соответствует инструкции.' : 'Порядок расходится с инструкцией.'} ${unpricedFact}`],
+    'sort-correct': [order, `${explainPriceRule(facts)} ${unpricedFact}`],
     'null-first': [position === 1, unpricedFact],
-    'null-last': [position !== 0 && position === check.items.length, unpricedFact],
+    'null-last': [position !== 0 && check.items.slice(position).every(({ price }) => price === null), unpricedFact],
     'null-missing': [position === 0, unpricedFact],
   } satisfies Record<keyof typeof priceClaims, [boolean | undefined, string]>;
 }

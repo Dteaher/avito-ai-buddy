@@ -1,14 +1,39 @@
 import { cities, type PriceResult, type Run } from './contracts.ts';
 
-export function priceObservations(check: PriceResult) {
+type PriceEvidence = Pick<PriceResult, 'items' | 'fixtures' | 'expectedOrder' | 'actualOrder' | 'ruleOrder'>;
+
+export function priceObservations(check: PriceEvidence) {
   const prices = check.items.flatMap(({ price }) => price === null ? [] : [price]);
-  const ascending = prices.length >= 2 ? prices.every((price, index) => index === 0 || prices[index - 1] <= price) : undefined;
+  const inverted = prices.findIndex((price, index) => index > 0 && prices[index - 1] > price);
+  const ascending = prices.length >= 2 ? inverted === -1 : undefined;
+  const firstUnpriced = check.items.findIndex(({ price }) => price === null);
+  const unpricedInMiddle = firstUnpriced >= 0 && check.items.slice(firstUnpriced + 1).some(({ price }) => price !== null);
   const expectedId = check.fixtures.find(({ price }) => price === null)?.id;
   const position = check.items.findIndex(({ id, price }) => id === expectedId && price === null) + 1;
   const required = check.ruleOrder.indexOf(expectedId ?? '') + 1;
-  const followsRule = check.ruleOrder.length === check.actualOrder.length && position === required && ascending === true
-    && check.ruleOrder.every((id, index) => id === check.actualOrder[index]);
-  return { ascending, position, required, followsRule };
+  const sameItems = check.items.length === check.fixtures.length
+    && check.fixtures.every(({ id }) => check.actualOrder.includes(id));
+  const positionsMatch = sameItems && check.expectedOrder.every((id, index) => check.actualOrder[index] === id);
+  const changes = check.fixtures.flatMap(({ id, title, price }) => {
+    const actual = check.items.find((item) => item.id === id);
+    return actual && actual.price !== price ? [{ id, title, before: price, after: actual.price }] : [];
+  });
+  const followsRule = inverted === -1 && !unpricedInMiddle;
+  const inversion = inverted < 0 ? undefined : [prices[inverted - 1], prices[inverted]];
+  return { ascending, position, required, followsRule, sameItems, positionsMatch, changes, inversion, unpricedInMiddle,
+    matches: positionsMatch && changes.length === 0 };
+}
+
+export function formatPrice(price: number | null) {
+  return price === null ? 'без цены' : `${new Intl.NumberFormat('ru-RU').format(price)} ₽`;
+}
+
+export function explainPriceRule(facts: ReturnType<typeof priceObservations>) {
+  return facts.followsRule ? 'Порядок соответствует правилу.'
+    : `Порядок расходится с правилом. ${[
+      facts.inversion && `${formatPrice(facts.inversion[0])} перед ${formatPrice(facts.inversion[1])}.`,
+      facts.unpricedInMiddle && 'Карточка без цены стоит перед карточкой с ценой.',
+    ].filter(Boolean).join(' ')}`;
 }
 
 export function sameObservedResult(first: Run, second: Run) {
@@ -50,9 +75,16 @@ export function summarizeRun(run: Run) {
       if (!item) return 'другое объявление';
       return item.price === null ? 'без цены' : `${item.price} ₽`;
     }).join(' → ') || 'пусто';
-    const { position: actualPosition, required: expectedPosition, followsRule: order } = priceObservations(check);
+    const facts = priceObservations(check);
+    const { position: actualPosition, required: expectedPosition } = facts;
     const position = expectedPosition && actualPosition && expectedPosition !== actualPosition
       ? ` Объявление без цены на ${actualPosition}-м месте вместо ${expectedPosition}-го.` : '';
-    return `${request} По правилу: ${labels(check.ruleOrder, check.fixtures)}. Стенд вернул: ${labels(check.actualOrder, check.items)}. ${order ? 'Порядок соответствует правилу.' : 'Порядок расходится с правилом.'}${position}`;
+    const changes = facts.changes.map(({ title, before, after }) => `${title}: ${formatPrice(before)} → ${formatPrice(after)}.`).join(' ');
+    const data = [changes && `Цены изменились. ${changes}`, !facts.sameItems && 'Состав отличается от исходного набора.'].filter(Boolean).join(' ');
+    return `${request} Ожидали: ${labels(check.expectedOrder, check.fixtures)}. Стенд вернул: ${labels(check.actualOrder, check.items)}. ${facts.matches ? 'Ожидание совпало.' : 'Ожидание отличается.'} ${data ? `${data} ` : ''}${explainPriceRule(facts)}${position}`;
   });
+}
+
+export function responseMatchesExpectation(check: Run['checks'][number]) {
+  return 'ruleOrder' in check ? priceObservations(check).matches : check.matches;
 }

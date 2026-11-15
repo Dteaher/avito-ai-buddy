@@ -100,7 +100,6 @@ export function Evidence({ run, animate = false, checkId, anchorPrefix }: {
       <section id={anchor(check.id)} className={`evidence${animate ? ' reveal' : ''}`} aria-label="Основной запрос">
         <div className="request-heading"><RequestLine check={check} /><span className="http-status">HTTP {check.status}</span></div>
         <PriceComparison check={check} animate={animate} />
-        <RuleDifference check={check} />
         <ResponseDetails check={check} />
       </section>
     );

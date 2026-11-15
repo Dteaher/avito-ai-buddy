@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { ArrowDownRight, ArrowLeft, ArrowUpRight, Check, CircleAlert, LoaderCircle, MessageCircle } from 'lucide-react';
 import type { BuddyQuestion, DemoIdentity, Publication, RecordListItem, Run, Workspace as WorkspaceData } from '../shared/contracts';
-import { responseFollowsRule, sameObservedResult, standLabel, summarizeRun } from '../shared/run-summary';
+import { responseFollowsRule, responseMatchesExpectation, sameObservedResult, standLabel, summarizeRun } from '../shared/run-summary';
 import { errorMessage, post, request } from './api';
 import { Evidence, RunContext, formatTime } from './Evidence';
 import { NextTask, Workspace } from './Workspace';
@@ -256,7 +256,7 @@ function Record({ publication: initial, workspace, mode }: { publication: Public
                 <div key={run.id}><h3>{title}</h3><time dateTime={run.checkedAt}>{formatTime(run.checkedAt)}</time>
                   <p className="fact">{standLabel(run)} · <code>{run.id.slice(0, 8)}</code></p>
                   {summarizeRun(run).map((fact) => <p className="fact" key={fact}>{fact}</p>)}
-                  <p className="fact"><strong>Совпадение с ожиданием</strong> · {run.checks.every(({ matches }) => matches) ? 'да' : 'есть расхождение'}</p>
+                  <p className="fact"><strong>Совпадение с ожиданием</strong> · {run.checks.every(responseMatchesExpectation) ? 'да' : 'есть расхождение'}</p>
                   <p className="fact"><strong>Соответствие правилу</strong> · {run.checks.every(responseFollowsRule) ? 'да' : 'есть расхождение'}</p>
                 </div>
               ))}

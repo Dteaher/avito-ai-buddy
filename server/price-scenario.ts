@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { PriceCheck, PriceListing, PriceRun, Task } from '../shared/contracts.ts';
 import { fetchStand, isObject } from './scenario.ts';
+import { priceObservations } from '../shared/run-summary.ts';
 
 export const sortTask: Task = {
   id: 'SORT-01',
@@ -52,12 +53,13 @@ export async function executePriceRun(origin: string, expectedOrder: string[]): 
   const { items, rawBody, status, standMode } = await fetchStand(origin, priceCheck.path, AbortSignal.timeout(5000));
   if (!items.every(isPriceListing)) throw new Error('Invalid price listings');
   const actualOrder = items.map(({ id }) => id);
-  const sameItems = actualOrder.length === expectedOrder.length && expectedOrder.every((id) => actualOrder.includes(id));
+  const evidence = { items, fixtures: priceItems, expectedOrder, actualOrder, ruleOrder };
+  const { matches, sameItems } = priceObservations(evidence);
   return {
     kind: 'price-order', id: randomUUID(), task: sortTask, checkedAt: new Date().toISOString(),
     checks: [{
-      ...priceCheck, status, standMode, rawBody, items, fixtures: priceItems, expectedOrder, actualOrder, ruleOrder, sameItems,
-      matches: sameOrder(expectedOrder, actualOrder), followsRule: sameOrder(expectedOrder, ruleOrder),
+      ...priceCheck, ...evidence, status, standMode, rawBody, sameItems, matches,
+      followsRule: sameOrder(expectedOrder, ruleOrder),
     }],
   };
 }

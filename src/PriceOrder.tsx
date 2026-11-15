@@ -1,9 +1,10 @@
 import { useLayoutEffect, useRef } from 'react';
 import { Check, CircleAlert, Undo2 } from 'lucide-react';
 import type { PriceCheck, PriceListing, PriceResult } from '../shared/contracts';
+import { explainPriceRule, formatPrice, priceObservations } from '../shared/run-summary';
 
 export function priceLabel(price: number | null) {
-  return price === null ? 'Без цены' : `${price} ₽`;
+  return price === null ? 'Без цены' : formatPrice(price);
 }
 
 export function PriceOrderInput({ check, items, order, disabled, onChange }: {
@@ -66,7 +67,10 @@ export function PriceComparison({ check, animate = false }: { check: PriceResult
     return item && expected !== -1 && expected !== actual ? [{ item, expected, actual }] : [];
   });
   const moved = moves.find(({ item }) => item.price === null) ?? moves[0];
-  const verdict = check.matches ? 'Порядок совпал с ожиданием.' : check.sameItems ? 'Состав совпал. Порядок отличается.' : 'Состав выдачи отличается.';
+  const facts = priceObservations(check);
+  const verdict = facts.matches ? 'Порядок совпал с ожиданием.'
+    : facts.positionsMatch ? 'Позиции совпали. Цены отличаются от ожидания.'
+      : facts.sameItems ? 'Состав совпал. Порядок отличается.' : 'Состав выдачи отличается.';
 
   useLayoutEffect(() => {
     const columns = comparison.current;
@@ -85,13 +89,18 @@ export function PriceComparison({ check, animate = false }: { check: PriceResult
 
   return (
     <>
-      <div className={`order-verdict ${check.matches ? 'ok' : 'bad'}`}>
-        {check.matches ? <Check size={20} /> : <CircleAlert size={20} />}
+      <div className={`order-verdict ${facts.matches ? 'ok' : 'bad'}`}>
+        {facts.matches ? <Check size={20} /> : <CircleAlert size={20} />}
         <div>
           <strong>{verdict}</strong>
           {moved && <p>{moved.item.price === null ? 'Объявление без цены' : moved.item.title} на {moved.actual + 1}-м месте вместо {moved.expected + 1}-го.</p>}
         </div>
       </div>
+      <p className="fact"><strong>Данные</strong> · {facts.changes.length || !facts.sameItems
+        ? [facts.changes.length && 'цены изменились', !facts.sameItems && 'состав изменился'].filter(Boolean).join(', ') : 'исходные цены и состав'}</p>
+      {!!facts.changes.length && <ul className="fact">{facts.changes.map(({ id, title, before, after }) =>
+        <li key={id}>{title} · {formatPrice(before)} → {formatPrice(after)}</li>)}</ul>}
+      <p className={`order-verdict ${facts.followsRule ? 'ok' : 'bad'}`}><strong>Правило</strong> · {explainPriceRule(facts)}</p>
       <div className="order-comparison" ref={comparison}>
         <OrderColumn title="Ожидали" order={check.expectedOrder} items={check.fixtures} highlight={moved?.expected} />
         <OrderColumn title="Стенд вернул" order={check.actualOrder} items={check.items} highlight={moved?.actual} />

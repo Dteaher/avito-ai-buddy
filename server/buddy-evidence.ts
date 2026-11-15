@@ -1,6 +1,7 @@
-import { cities, type BuddyAnswer, type BuddySource, type CheckResult, type PriceResult, type Run, type Task } from '../shared/contracts.ts';
+import { cities, type BuddyAnswer, type BuddySource, type CheckResult, type Run, type Task } from '../shared/contracts.ts';
 import { priceCheck, sortTask } from './price-scenario.ts';
 import { checks } from './scenario.ts';
+import { summarizeRun } from '../shared/run-summary.ts';
 
 export interface EvidenceEntry {
   source: BuddySource;
@@ -11,17 +12,7 @@ function cityList(list: CheckResult['actualCities']) {
   return list.map((city) => cities[city]).join(', ') || 'пусто';
 }
 
-function priceOrder(check: PriceResult, kind: 'expectedOrder' | 'actualOrder') {
-  const items = kind === 'actualOrder' ? check.items : check.fixtures;
-  return check[kind].slice(0, 12).map((id) => {
-    const item = items.find((candidate) => candidate.id === id);
-    const knownId = check.fixtures.some((entry) => entry.id === id) ? id : 'другое объявление';
-    return `${knownId} (${item?.price == null ? 'без цены' : `${item.price} ₽`})`;
-  }).join(' → ') || 'пусто';
-}
-
-function summarize(check: CheckResult | PriceResult) {
-  if ('expectedCities' in check) {
+function summarize(check: CheckResult) {
     if (!check.followsRule) {
       const actualMatchesRule = check.actualCities.length === check.ruleCities.length
         && check.ruleCities.every((city) => check.actualCities.includes(city));
@@ -30,14 +21,6 @@ function summarize(check: CheckResult | PriceResult) {
     const missing = check.missing.length ? ` Отсутствуют города из ожидания — ${cityList(check.missing)}.` : '';
     const extra = check.extra.length ? ` Лишние города — ${cityList(check.extra)}.` : '';
     return `Ожидание — ${cityList(check.expectedCities)}. Фактически — ${cityList(check.actualCities)}.${missing}${extra}`;
-  }
-  const composition = check.sameItems ? 'Состав совпал.' : 'Состав выдачи отличается.';
-  const withoutPrice = check.fixtures.find(({ price }) => price === null)?.id;
-  const expectedPosition = withoutPrice ? check.expectedOrder.indexOf(withoutPrice) + 1 : 0;
-  const actualPosition = withoutPrice ? check.actualOrder.indexOf(withoutPrice) + 1 : 0;
-  const position = expectedPosition && actualPosition
-    ? ` Место объявления без цены в ожидании — ${expectedPosition}, в ответе — ${actualPosition}.` : '';
-  return `Ожидаемый порядок — ${priceOrder(check, 'expectedOrder')}. Фактический — ${priceOrder(check, 'actualOrder')}. ${composition}${position}`;
 }
 
 export function buddyEvidence(task: Task, run?: Run) {
@@ -54,7 +37,7 @@ export function buddyEvidence(task: Task, run?: Run) {
     const rule = check.followsRule ? 'Ожидание соответствует инструкции прогона.' : 'Ожидание расходится с инструкцией прогона.';
     evidence.set(`run:${check.id}`, {
       source: { runId: run.id, checkId: check.id, label: check.label },
-      facts: `GET ${check.path} · HTTP ${check.status}. ${summarize(check)} ${result} ${rule}`,
+      facts: 'actualOrder' in check ? `${summarizeRun(run)[0]} ${rule}` : `GET ${check.path} · HTTP ${check.status}. ${summarize(check)} ${result} ${rule}`,
     });
   }
   return evidence;
@@ -63,7 +46,7 @@ export function buddyEvidence(task: Task, run?: Run) {
 export function guideRunAnswer(query: string, run: Run | undefined, evidence: Map<string, EvidenceEntry>): Pick<BuddyAnswer, 'kind' | 'text' | 'sources'> | undefined {
   if (!run || !/прогон|расхожд|фактич|итог|сырой|отчет|пропал[аи]? из ответа|сдвинул|что (?:было|пришло) в (?:контрольн|основн)|что вернул (?:стенд|контрольн|основн)|результат (?:стенда|проверки)|стенд (?:вернул|показал)/.test(query)) return;
   const [primary, control] = run.checks;
-  let relevant: (CheckResult | PriceResult)[] = [primary];
+  let relevant: Run['checks'][number][] = [primary];
   if (control) {
     const mentionsPrimary = /основн|без (?:города|фильтра)/.test(query);
     const mentionsControl = /контроль|city\s*=\s*kazan|фильтр по казани/.test(query);
