@@ -43,6 +43,8 @@ describe('Review of conclusions against real snapshots', () => {
     'Коллега написал, что карточка пропала. Я хочу проверить.',
     '«Карточка без цены пропала», — написал коллега.',
     'Не берусь утверждать, что карточку без ценника потеряли.',
+    'Мне сказали, что объявление без цены исчезло.',
+    'Карточка без цены пропала?!',
   ])('shows observations rather than scoring %s', (question) => {
     const answer = guideFeedback(sortFixed, question.toLowerCase(), ['null-missing', 'sort-correct']);
     expect(answer.verdicts?.map(({ status }) => status)).toEqual(['observation']);
