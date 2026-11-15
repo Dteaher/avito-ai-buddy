@@ -15,7 +15,8 @@
     "lint": "eslint .",
     "test": "vitest run",
     "coverage": "vitest run --coverage",
-    "eval:buddy": "node --env-file-if-exists=.env scripts/eval-buddy.ts"
+    "eval:buddy": "node --env-file-if-exists=.env scripts/eval-buddy.ts",
+    "eval:hardening": "node --env-file-if-exists=.env scripts/eval-hardening.ts"
   },
   "dependencies": {
     "@fontsource-variable/inter": "5.3.0",
