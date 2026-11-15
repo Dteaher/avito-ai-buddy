@@ -45,10 +45,13 @@ export function Workspace({ data, mode, chooseMode, revision }: {
   const dialog = useRef<HTMLDialogElement>(null);
   const heading = useRef<HTMLHeadingElement>(null);
   const recordLink = useRef<HTMLAnchorElement>(null);
+  const runAction = useRef<HTMLButtonElement>(null);
   const shouldFocus = useRef(false);
   const actionReady = priceTask ? order.length === data.orderItems.length
     : (!data.attemptId || Boolean(selectedCheck)) && data.checks.every(({ id }) => choices[id] !== undefined);
   const expectedGroups = task.comparison?.values ?? Object.keys(cities) as City[];
+  const statusChecks = task.comparison?.checks;
+  const formChecks = statusChecks?.[0].id === 'active-only' ? statusChecks.toReversed() : statusChecks;
   const attemptInput = () => ({
     attemptId: data.attemptId, checkId: data.attemptId ? selectedCheck : undefined,
     checks: data.checks.flatMap(({ id }) => id === 'price-asc' ? [] : [{ id, expectedCities: choices[id] }]),
@@ -64,6 +67,10 @@ export function Workspace({ data, mode, chooseMode, revision }: {
   useEffect(() => {
     if (publication && document.activeElement === document.body) recordLink.current?.focus({ preventScroll: true });
   }, [publication]);
+
+  useEffect(() => {
+    if (firstChoice && document.activeElement === document.body) runAction.current?.focus();
+  }, [firstChoice]);
 
   function move(next: number) {
     shouldFocus.current = next !== stage;
@@ -170,9 +177,9 @@ export function Workspace({ data, mode, chooseMode, revision }: {
         <span>{revision.review?.comment}</span></p>}
 
       <nav className="task-nav" aria-label="Рабочие задачи">
-        {data.tasks.map(({ id, comparison }) => (
+        {data.tasks.map(({ id, shortTitle, comparison }) => (
           <a key={id} href={id === 'SEARCH-01' ? '/' : `/?task=${encodeURIComponent(id)}`} aria-current={id === task.id ? 'page' : undefined}>
-            {comparison ? 'Архивные товары' : id === 'SEARCH-01' ? 'Фильтр по городу' : 'Сортировка по цене'}
+            {shortTitle ?? (comparison ? 'Архивные товары' : id === 'SEARCH-01' ? 'Фильтр по городу' : 'Сортировка по цене')}
           </a>
         ))}
       </nav>
@@ -238,18 +245,18 @@ export function Workspace({ data, mode, chooseMode, revision }: {
               {preparation && <p className="fallback-note" role="status">Черновик в форме. Проверь ожидание и при необходимости измени его.</p>}
               {data.attemptId && <fieldset className="attempt-pick" disabled={busy || savingChoice}>
                 <legend>Какой запрос проверяет поручение?</legend>
-                {data.checks.map(({ id, label }) => <label key={id}>
-                  <input type="radio" name="check-choice" checked={selectedCheck === id} onChange={() => setSelectedCheck(id as CheckId)} /> {label}
+                {formChecks?.map(({ id, label }) => <label key={id}>
+                  <input type="radio" name="check-choice" checked={selectedCheck === id} onChange={() => setSelectedCheck(id)} /> {label}
                 </label>)}
               </fieldset>}
               {priceTask ? <PriceOrderInput check={data.checks[0]} items={data.orderItems} order={order} disabled={busy} onChange={(next) => {
                 setOrder(next);
                 clearResult();
-              }} /> : data.checks.map((check, index) => {
+              }} /> : (formChecks ?? data.checks).map((check, index) => {
                 const selected = choices[check.id];
                 return (
                   <fieldset className="expectation" key={check.id} disabled={busy || savingChoice}>
-                    <legend>{index === 0 ? 'Основной запрос' : 'Контрольный запрос'}</legend>
+                    <legend>{formChecks ? check.label : index === 0 ? 'Основной запрос' : 'Контрольный запрос'}</legend>
                     <div className="request-heading"><span className="endpoint"><span>GET</span><code>{check.path}</code></span><span className="parameter">{check.parameter}</span></div>
                     <span className="field-label">{task.comparison ? 'Ожидаемые группы' : 'Ожидаемые города'}</span>
                     <div className="choices">
@@ -263,13 +270,13 @@ export function Workspace({ data, mode, chooseMode, revision }: {
               })}
               {failure && <p className="action-error" role="alert"><CircleAlert size={19} />{failure}</p>}
               <div className="actions">
-                {data.attemptId && !firstChoice && <button type="button" className="button secondary" disabled={!actionReady || savingChoice || busy}
-                  onClick={() => void saveChoice()}>{savingChoice ? 'Сохраняем…' : 'Зафиксировать первый вариант'}</button>}
+                {data.attemptId && !firstChoice ? <button type="button" className="button primary" disabled={!actionReady || savingChoice || busy}
+                  onClick={() => void saveChoice()}>{savingChoice ? 'Сохраняем…' : 'Зафиксировать первый вариант'} <ArrowRight size={19} /></button> :
+                  <button type="button" ref={runAction} className="button primary run-action" disabled={!actionReady || savingChoice} aria-disabled={busy || undefined} onClick={() => void launch()}>
+                    {busy ? 'Запускаем проверку…' : failure ? 'Повторить проверку' : 'Запустить проверку'}
+                    {busy ? <LoaderCircle size={18} className="spinner" /> : <ArrowRight size={19} />}
+                  </button>}
                 {firstChoice && <p className="fact" role="status">Первый вариант сохранён · {data.checks.find(({ id }) => id === firstChoice.checkId)?.label}.</p>}
-                <button type="button" className="button primary run-action" disabled={!actionReady || savingChoice} aria-disabled={busy || undefined} onClick={() => void launch()}>
-                  {busy ? 'Запускаем проверку…' : failure ? 'Повторить проверку' : 'Запустить проверку'}
-                  {busy ? <LoaderCircle size={18} className="spinner" /> : <ArrowRight size={19} />}
-                </button>
               </div>
             </>
           )}
@@ -281,7 +288,13 @@ export function Workspace({ data, mode, chooseMode, revision }: {
               <Evidence key={run.id} run={run} animate={animateResult} anchorPrefix="result-evidence" />
               <AttemptTrail run={run} openRule={openSource} />
               {stage === 2 && !publication && <Conclusion key={`${run.id}/${mode}`} run={run} value={conclusion} onChange={setConclusion} openRule={openSource} mode={mode} />}
-              {stage === 3 && !publication && conclusion.trim() && <p className="record-conclusion"><strong>Твой вывод</strong>{conclusion}</p>}
+              {stage === 3 && <p className="record-conclusion"><strong>Твой вывод</strong>{(publication ? publication.conclusion : conclusion) || 'Вывод не добавлен.'}</p>}
+              {stage === 3 && publication && <p className="publication-status" role="status">
+                {publication.tracker?.status === 'delivered' && <>Доставлено в демо-трекер. Квитанция <code>{publication.tracker.id}</code>.</>}
+                {publication.tracker?.status === 'pending' && 'Запись сохранена. Открой её, чтобы повторить доставку в трекер.'}
+                {publication.tracker?.status === 'blocked' && 'Запись сохранена. Трекер отклонил отправку.'}
+                {!publication.tracker && 'Запись сохранена. Открой её, чтобы увидеть решение наставника.'}
+              </p>}
               {stage === 3 && <details className="response-details">
                 <summary>Данные записи для трекера · {task.id} <ChevronDown size={17} className="disclosure" /></summary>
                 <RunContext run={run} />
@@ -314,7 +327,6 @@ export function Workspace({ data, mode, chooseMode, revision }: {
                 )}
               </div>
               {stage === 3 && publication && task.id === 'SEARCH-01' && <NextTask />}
-              {publication && <p className="first-task-note">Запись сохранена. Открой её, чтобы увидеть решение наставника.</p>}
             </>
           )}
         </section>

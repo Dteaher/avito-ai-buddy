@@ -18,6 +18,7 @@ export interface Instruction {
 export interface Task {
   id: string;
   title: string;
+  shortTitle?: string;
   description: string;
   criterion: string;
   instruction: Instruction;
@@ -50,7 +51,12 @@ interface WorkspaceBase {
   identity?: DemoIdentity;
   standFixed?: boolean;
   attemptId?: string;
-  assignmentOffer?: { id: string; title: string; version: string; assigned: boolean };
+  assignmentCatalog?: AssignmentCatalog;
+}
+
+export interface AssignmentCatalog {
+  traineeId: DemoIdentityId;
+  offers: { id: string; title: string; criterion: string; version: string; assignedVersion?: string }[];
 }
 
 export type DemoIdentityId = 'demo-trainee' | 'demo-trainee-b' | 'demo-mentor';
@@ -131,12 +137,15 @@ export type CityRun = RunBase & { kind?: never; checks: CheckResult[] };
 export type PriceRun = RunBase & { kind: 'price-order'; checks: [PriceResult] };
 export type Run = CityRun | PriceRun;
 
+export type TrackerDelivery = { status: 'pending' | 'blocked' } | { status: 'delivered'; id: string };
+
 export interface Publication {
   id: string;
   url: string;
   publishedAt: string;
   run: Run;
   conclusion?: string;
+  tracker?: TrackerDelivery;
   review?: { decision: 'accepted' | 'returned'; comment: string; reviewedAt: string };
   replay?: Run;
   replayBy?: DemoIdentityId;

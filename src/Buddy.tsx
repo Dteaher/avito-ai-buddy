@@ -122,10 +122,11 @@ export function Buddy({ workspace, openSource, run, collapsible = false, intent,
             <div className="welcome">
               <p className="bubble assistant">{workspace.kind === 'price-order'
                 ? 'Попробуй задать порядок по инструкции. Если сомневаешься, спроси меня.'
-                : task.comparison ? 'Можно сначала сохранить свой вариант. Если понадобится подсказка, напиши, что хочешь проверить.'
+                : task.comparison ? run ? 'Спроси, какой факт из сохранённого ответа подтверждает вывод.'
+                  : 'Можно сначала сохранить свой вариант. Если понадобится подсказка, напиши, что хочешь проверить.'
                   : 'Помогу разобраться в задаче и сверить ожидания с правилами команды. С чего начнём?'}</p>
               <div className="suggestions">
-                {(workspace.kind === 'price-order' ? priceSuggestions : task.comparison ? ['Достаточно проверить активные товары?'] : suggestions).map((question) => (
+                {(workspace.kind === 'price-order' ? priceSuggestions : task.comparison ? (run ? [] : ['Как выбрать запрос для этого поручения?']) : suggestions).map((question) => (
                   <button key={question} type="button" onClick={() => void ask(question, true)}>{question}<ArrowUpRight size={15} /></button>
                 ))}
               </div>

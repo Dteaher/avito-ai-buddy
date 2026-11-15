@@ -6,11 +6,12 @@ import { summarizeRun } from '../shared/run-summary';
 export function CopyEvidence({ publication }: { publication: Publication }) {
   const id = useId();
   const [status, setStatus] = useState<'copied' | 'manual'>();
-  const { run, conclusion, url } = publication;
+  const { run, conclusion, url, tracker } = publication;
   const evidence = [
     `${run.task.id} · ${run.task.title}`,
     `Правило ${run.task.instruction.id} v${run.task.instruction.version}`,
     `Снимок ${run.id}`,
+    ...(tracker?.status === 'delivered' ? [`Квитанция трекера ${tracker.id}`] : []),
     ...summarizeRun(run),
     `Вывод: ${conclusion || '—'}`,
     new URL(url, window.location.origin).href,

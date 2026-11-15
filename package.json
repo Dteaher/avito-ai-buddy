@@ -8,9 +8,9 @@
   },
   "packageManager": "pnpm@11.25.0",
   "scripts": {
-    "dev": "concurrently -k -n api,web \"node --env-file-if-exists=.env --watch server/main.ts\" \"vite\"",
+    "dev": "concurrently -k -n api,tracker,web \"node --env-file-if-exists=.env --watch server/main.ts\" \"node --env-file-if-exists=.env --watch server/tracker-main.ts\" \"vite\"",
     "build": "vite build",
-    "start": "node --env-file-if-exists=.env server/main.ts",
+    "start": "concurrently -n api,tracker \"node --env-file-if-exists=.env server/main.ts\" \"node --env-file-if-exists=.env server/tracker-main.ts\"",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "vitest run",

@@ -8,6 +8,7 @@ import { createApp } from '../server/app.ts';
 import { createBuddy } from '../server/buddy.ts';
 import { readProvider } from '../server/buddy-model.ts';
 import { createStore } from '../server/store.ts';
+import { createTrackerClient, createTrackerService, type TrackerEvidence } from '../server/tracker.ts';
 import { priceObservations, summarizeRun } from '../shared/run-summary.ts';
 import { buddyCases } from './buddy-cases.ts';
 
@@ -42,9 +43,9 @@ describe('SEARCH-01 over HTTP', () => {
   let standBase: string;
   let cookie: string;
 
-  async function start(env: NodeJS.ProcessEnv = {}) {
+  async function start(env: NodeJS.ProcessEnv = {}, tracker?: Parameters<typeof createApp>[0]['tracker']) {
     store = createStore(join(dir, 'test.sqlite'));
-    server = createServer(createApp({ store, standOrigin: () => standBase, buddy: createBuddy(env) }));
+    server = createServer(createApp({ store, standOrigin: () => standBase, buddy: createBuddy(env), tracker }));
     base = await listen(server);
     standBase = base;
     const session = await fetch(`${base}/api/workspace`);
@@ -78,6 +79,138 @@ describe('SEARCH-01 over HTTP', () => {
     vi.restoreAllMocks();
     await stop();
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('keeps a confirmed publication during tracker failure and resends only its original evidence after restart', async () => {
+    const send = vi.fn().mockResolvedValueOnce({ status: 'pending' }).mockResolvedValue({ status: 'delivered', id: 'TRK-42' });
+    await stop();
+    await start({}, send);
+    const result = await (await run()).json();
+    const endpoint = `${task}/runs/${result.id}/publication`;
+    expect(send).not.toHaveBeenCalled();
+    const published = await post(endpoint, { conclusion: 'В общем списке нет Самары.' });
+    expect(published.status).toBe(201);
+    const record = await published.json();
+    expect(record.tracker).toEqual({ status: 'pending' });
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ taskId: 'SEARCH-01', publicationId: record.id,
+      runId: result.id, localEvidenceUrl: record.url, conclusion: 'В общем списке нет Самары.' }));
+    const originalEvidence = send.mock.calls[0][0];
+
+    await stop();
+    await start({}, send);
+    const path = `/api/records/${record.id}/tracker`;
+    const other = await signIn('demo-trainee-b');
+    const mentor = await signIn('demo-mentor');
+    expect((await post(path, {}, other)).status).toBe(404);
+    expect((await post(path, {}, mentor)).status).toBe(404);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(await (await post(path, { conclusion: 'Подменённый вывод' })).json()).toEqual({ status: 'delivered', id: 'TRK-42' });
+    expect(send).toHaveBeenLastCalledWith(originalEvidence);
+    expect(await (await get(`/api/records/${record.id}`, mentor)).json()).toMatchObject({
+      tracker: { status: 'delivered', id: 'TRK-42' }, conclusion: 'В общем списке нет Самары.',
+    });
+    expect((await post(endpoint, { conclusion: 'Подменённый вывод' })).status).toBe(200);
+    expect(send).toHaveBeenCalledTimes(2);
+  });
+
+  it('deduplicates a delivery in the separate tracker after a lost response and rejects changed evidence', async () => {
+    const trackerPath = join(dir, 'tracker.sqlite');
+    const service = createTrackerService(trackerPath, 'test-tracker-secret');
+    const trackerServer = createServer(service.app);
+    const target = await listen(trackerServer);
+    let interruptedStatus: number | undefined;
+    const proxy = createServer(async (req, res) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const saved = await fetch(`${target}${req.url}`, {
+        method: 'POST', headers: req.headers as HeadersInit, body: Buffer.concat(chunks).toString(),
+      });
+      interruptedStatus = saved.status;
+      await saved.json();
+      res.destroy();
+    });
+    const interrupted = await listen(proxy);
+    try {
+      const evidence: TrackerEvidence = { taskId: 'SEARCH-01', publicationId: 'QA-test', runId: 'run-test',
+        ruleId: 'search', ruleVersion: '1.0', localEvidenceUrl: '/records/QA-test', conclusion: 'Нет Самары.' };
+      const send = createTrackerClient(target, 'test-tracker-secret');
+      const foreign = createTrackerClient(target, 'another-secret');
+      expect(await foreign(evidence)).toEqual({ status: 'blocked' });
+      expect(await createTrackerClient(interrupted, 'test-tracker-secret')(evidence)).toEqual({ status: 'pending' });
+      expect(interruptedStatus).toBe(201);
+      const retries = await Promise.all([send(evidence), send(evidence)]);
+      expect(retries[0]).toMatchObject({ status: 'delivered', id: expect.stringMatching(/^TRK-/) });
+      expect(retries[1]).toEqual(retries[0]);
+      expect(await send({ ...evidence, conclusion: 'Вывод подменён.' })).toEqual({ status: 'blocked' });
+      const db = new DatabaseSync(trackerPath);
+      try {
+        expect(db.prepare('SELECT count(*) AS count FROM evidence').get()).toEqual({ count: 1 });
+      } finally {
+        db.close();
+      }
+    } finally {
+      await Promise.all([proxy, trackerServer].map((listener) => new Promise<void>((resolve) => listener.close(() => resolve()))));
+      service.close();
+    }
+  });
+
+  it('assigns both templates independently and diagnoses archive leakage in the filtered query', async () => {
+    const active = '/api/tasks/ACTIVE-01';
+    const selection = '/api/workspace?task=ACTIVE-01';
+    const mentor = await signIn('demo-mentor');
+    const traineeB = await signIn('demo-trainee-b');
+    expect((await get(selection)).status).toBe(404);
+    const templates = await (await get('/api/workspace', mentor)).json();
+    expect(templates.assignmentCatalog.offers.map(({ id }: { id: string }) => id)).toEqual(['ARCHIVE-01', 'ACTIVE-01']);
+    for (const templateId of ['ARCHIVE-01', 'ACTIVE-01']) {
+      expect((await post('/api/assignments', { templateId, traineeId: 'demo-trainee' }, mentor)).status).toBe(201);
+    }
+    expect((await get(selection, traineeB)).status).toBe(404);
+    expect((await get(`${active}/instruction`, traineeB)).status).toBe(404);
+    expect((await post(`${active}/runs`, {}, traineeB)).status).toBe(404);
+    expect((await post(`${active}/buddy`, { question: 'Что проверить?' }, traineeB)).status).toBe(404);
+    expect((await get('/demo/inventory/filter-check?status=active', traineeB)).status).toBe(404);
+
+    const workspace = await (await get(selection)).json();
+    expect(workspace.tasks.map(({ id }: { id: string }) => id)).toEqual(['SEARCH-01', 'SORT-01', 'ARCHIVE-01', 'ACTIVE-01']);
+    const first = { attemptId: workspace.attemptId, checkId: 'active-only', checks: [
+      { id: 'active-only', expectedCities: ['active'] }, { id: 'all-statuses', expectedCities: ['active', 'archived'] },
+    ] };
+    expect((await post(`${active}/attempt`, first)).status).toBe(200);
+    expect(await (await post(`${active}/buddy`, {
+      question: 'Достаточно запроса без фильтра?', attemptId: first.attemptId, intent: 'plan', mode: 'guide',
+    })).json()).toMatchObject({ draft: { checkId: 'active-only' }, sources: [{ ruleNumber: 2 }] });
+    const launch = await post(`${active}/runs`, first);
+    expect(launch.status).toBe(201);
+    const run = await launch.json();
+    expect(run).toMatchObject({
+      task: { id: 'ACTIVE-01', instruction: { version: '1.0' } },
+      attempt: { first: { checkId: 'active-only', expected: ['active'] }, help: 'after-choice' },
+      checks: [{ id: 'active-only', status: 200, extra: ['archived'], matches: false }, { id: 'all-statuses', status: 200, matches: true }],
+    });
+    const conclusion = 'Архивные товары попали в ответ с status=active.';
+    const reviewInput = { question: conclusion, runId: run.id, intent: 'review', mode: 'guide' };
+    expect(await (await post(`${active}/buddy`, reviewInput)).json()).toMatchObject({
+      verdicts: [{ status: 'confirmed' }], sources: expect.arrayContaining([expect.objectContaining({ runId: run.id, checkId: 'active-only' })]),
+    });
+    const record = await (await post(`${active}/runs/${run.id}/publication`, { conclusion })).json();
+    const path = `/api/records/${record.id}`;
+    expect((await get(path, traineeB)).status).toBe(404);
+    expect((await get(`${active}/runs/${run.id}`, traineeB)).status).toBe(404);
+    expect((await post(`${active}/buddy`, reviewInput, traineeB)).status).toBe(404);
+    const database = new DatabaseSync(join(dir, 'test.sqlite'));
+    database.prepare('UPDATE assignments SET snapshot = ? WHERE task_id = ? AND trainee = ?')
+      .run(JSON.stringify({ ...workspace.task, instruction: { ...workspace.task.instruction, version: '2.0' } }), 'ACTIVE-01', 'demo-trainee');
+    database.close();
+    await stop();
+    await start();
+    expect(await (await get(selection)).json()).toMatchObject({ task: { instruction: { version: '2.0' } } });
+    expect(await (await get(path, mentor)).json()).toMatchObject({ run, conclusion });
+    await post('/api/demo/stand', { fixed: true }, mentor);
+    const replay = await (await post(`${path}/replay`, {}, mentor)).json();
+    expect(replay).toMatchObject({ task: { instruction: { version: '2.0' } }, checks: [{ matches: true }, { matches: true }] });
+    expect(await (await post(`${active}/buddy`, { ...reviewInput, runId: replay.id })).json())
+      .toMatchObject({ verdicts: [{ status: 'refuted' }] });
   });
 
   it('assigns a versioned catalog task and preserves the trainee decision and help order', async () => {
@@ -163,6 +296,55 @@ describe('SEARCH-01 over HTTP', () => {
       runId: result.id, intent: 'review', mode: 'guide',
     });
     expect(await quotation.json()).toMatchObject({ verdicts: [{ status: 'observation' }] });
+  });
+
+  it('assigns a different diagnostic task and distinguishes a healthy baseline from a defective filter', async () => {
+    const mentor = await signIn('demo-mentor');
+    const other = await signIn('demo-trainee-b');
+    const path = '/api/tasks/ACTIVE-01';
+    const workspacePath = '/api/workspace?task=ACTIVE-01';
+    const offers = (await (await get('/api/workspace', mentor)).json()).assignmentCatalog;
+    expect(offers).toMatchObject({ traineeId: 'demo-trainee', offers: [{ id: 'ARCHIVE-01' }, { id: 'ACTIVE-01' }] });
+    const input = { templateId: 'ACTIVE-01', traineeId: 'demo-trainee' };
+    expect((await post('/api/assignments', { ...input, traineeId: 'demo-trainee-b' }, mentor)).status).toBe(400);
+    expect((await post('/api/assignments', input, mentor)).status).toBe(201);
+    expect((await post('/api/assignments', input, mentor)).status).toBe(200);
+    expect((await get(workspacePath, other)).status).toBe(404);
+    expect((await get(`${path}/instruction`, other)).status).toBe(404);
+
+    await stop();
+    await start();
+    const workspace = await (await get(workspacePath)).json();
+    expect(workspace.task.instruction.version).toBe('1.0');
+    expect(workspace.checks.map(({ id }: { id: string }) => id)).toEqual(['active-only', 'all-statuses']);
+    const choices = [
+      { id: 'active-only', expectedCities: ['active'] }, { id: 'all-statuses', expectedCities: ['active', 'archived'] },
+    ];
+    const attemptId = workspace.attemptId;
+    expect((await post(`${path}/attempt`, { attemptId, checkId: 'all-statuses', checks: choices })).status).toBe(200);
+    const advice = await (await post(`${path}/buddy`, { question: 'Достаточно проверить общую выдачу?', attemptId, intent: 'plan', mode: 'guide' })).json();
+    expect(advice).toMatchObject({ draft: { checkId: 'active-only' }, sources: [{ ruleNumber: 2 }] });
+    const response = await post(`${path}/runs`, { attemptId, checkId: 'active-only', checks: choices });
+    expect(response.status).toBe(201);
+    const result = await response.json();
+    expect(result).toMatchObject({
+      attempt: { first: { checkId: 'all-statuses' }, final: { checkId: 'active-only' }, help: 'after-choice' },
+      checks: [{ id: 'active-only', status: 200, matches: false, extra: ['archived'] }, { id: 'all-statuses', status: 200, matches: true }],
+    });
+    const conclusion = 'При status=active в выдачу попали архивные товары.';
+    const feedback = { question: conclusion, runId: result.id, intent: 'review', mode: 'guide' };
+    expect(await (await post(`${path}/buddy`, feedback)).json()).toMatchObject({
+      verdicts: [{ status: 'confirmed' }], sources: [{ checkId: 'active-only' }, { ruleNumber: 2 }],
+    });
+    const record = await (await post(`${path}/runs/${result.id}/publication`, { conclusion })).json();
+    const recordPath = `/api/records/${record.id}`;
+    const reviewer = await signIn('demo-mentor');
+    expect((await get(recordPath, other)).status).toBe(404);
+    await post('/api/demo/stand', { fixed: true }, reviewer);
+    const replay = await (await post(`${recordPath}/replay`, {}, reviewer)).json();
+    expect(replay.checks).toMatchObject([{ matches: true }, { matches: true }]);
+    expect(await (await post(`${path}/buddy`, { ...feedback, runId: replay.id })).json()).toMatchObject({ verdicts: [{ status: 'refuted' }] });
+    expect(await (await get(recordPath, reviewer)).json()).toMatchObject({ run: result, replay, conclusion });
   });
 
   it('lets only a mentor configure the synthetic stand and persists the actual mode of each snapshot', async () => {

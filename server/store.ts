@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import type { AttemptChoice, DemoIdentityId, Publication, Run, Task } from '../shared/contracts.ts';
+import type { AttemptChoice, DemoIdentityId, Publication, Run, Task, TrackerDelivery } from '../shared/contracts.ts';
 
 export function createStore(path: string) {
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
@@ -74,6 +74,9 @@ export function createStore(path: string) {
     if (!db.prepare('PRAGMA table_info(record_replays)').all().some(({ name }) => name === 'actor')) {
       db.exec('ALTER TABLE record_replays ADD COLUMN actor TEXT');
     }
+    if (!recordColumns.includes('tracker_status')) {
+      db.exec('ALTER TABLE records ADD COLUMN tracker_status TEXT; ALTER TABLE records ADD COLUMN tracker_id TEXT');
+    }
     db.exec('COMMIT');
   } catch (error) {
     db.exec('ROLLBACK');
@@ -85,21 +88,24 @@ export function createStore(path: string) {
   const insertRun = db.prepare('INSERT INTO runs (id, owner, task_id, snapshot) VALUES (?, ?, ?, ?)');
   const runById = db.prepare('SELECT snapshot FROM runs WHERE id = ? AND owner = ? AND task_id = ?');
   const insertRecord = db.prepare(`
-    INSERT INTO records (id, run_id, published_at, conclusion)
-    SELECT ?, id, ?, ? FROM runs WHERE id = ? AND owner = ? AND task_id = ?
+    INSERT INTO records (id, run_id, published_at, conclusion, tracker_status)
+    SELECT ?, id, ?, ?, ? FROM runs WHERE id = ? AND owner = ? AND task_id = ?
     ON CONFLICT(run_id) WHERE canonical = 1 DO NOTHING
   `);
   const recordQuery = `
-    SELECT records.id, published_at, snapshot, conclusion, decision, comment, reviewed_at, previous_id
+    SELECT records.id, published_at, snapshot, conclusion, decision, comment, reviewed_at, previous_id, tracker_status, tracker_id
     FROM records JOIN runs ON runs.id = run_id LEFT JOIN reviews ON record_id = records.id
   `;
   const byRun = db.prepare(`${recordQuery} WHERE run_id = ? AND owner = ? AND task_id = ? AND canonical = 1`);
   const byId = db.prepare(`${recordQuery} WHERE records.id = ? AND owner = ?`);
   const nextVersion = db.prepare(`${recordQuery} WHERE previous_id = ? AND owner = ?`);
   const insertRevision = db.prepare(`
-    INSERT INTO records (id, run_id, published_at, conclusion, previous_id, canonical)
-    SELECT ?, id, ?, ?, ?, ? FROM runs WHERE id = ? AND owner = ? AND task_id = ?
+    INSERT INTO records (id, run_id, published_at, conclusion, previous_id, canonical, tracker_status)
+    SELECT ?, id, ?, ?, ?, ?, ? FROM runs WHERE id = ? AND owner = ? AND task_id = ?
     ON CONFLICT DO NOTHING
+  `);
+  const completeDelivery = db.prepare(`
+    UPDATE records SET tracker_status = ?, tracker_id = ? WHERE id = ? AND tracker_status = 'pending'
   `);
   const byOwner = db.prepare(`
     SELECT records.id, task_id, published_at, decision, previous_id,
@@ -142,6 +148,10 @@ export function createStore(path: string) {
     const record: Publication = { id: String(row.id), url: `/records/${row.id}`, publishedAt: String(row.published_at),
       run: JSON.parse(String(row.snapshot)) as Run };
     if (row.conclusion) record.conclusion = String(row.conclusion);
+    if (row.tracker_status === 'pending' || row.tracker_status === 'blocked') record.tracker = { status: row.tracker_status };
+    if (row.tracker_status === 'delivered' && typeof row.tracker_id === 'string') {
+      record.tracker = { status: 'delivered', id: row.tracker_id };
+    }
     if (row.decision === 'accepted' || row.decision === 'returned') record.review = {
       decision: row.decision, comment: String(row.comment), reviewedAt: String(row.reviewed_at),
     };
@@ -208,21 +218,24 @@ export function createStore(path: string) {
       const row = runById.get(id, owner, taskId);
       return row ? JSON.parse(String(row.snapshot)) as Run : undefined;
     },
-    publish(runId: string, owner: string, taskId: string, conclusion = '') {
+    publish(runId: string, owner: string, taskId: string, conclusion = '', track = false) {
       const id = `QA-${randomUUID()}`;
-      const { changes } = insertRecord.run(id, new Date().toISOString(), conclusion, runId, owner, taskId);
+      const { changes } = insertRecord.run(id, new Date().toISOString(), conclusion, track ? 'pending' : null, runId, owner, taskId);
       const saved = byRun.get(runId, owner, taskId);
       const record = saved ? readRecord(String(saved.id), owner) : undefined;
       return { record, created: changes === 1 };
     },
     readRecord,
-    revise(previous: Publication, owner: string, runId: string, conclusion: string) {
+    revise(previous: Publication, owner: string, runId: string, conclusion: string, track = false) {
       const id = `QA-${randomUUID()}`;
       const { changes } = insertRevision.run(id, new Date().toISOString(), conclusion, previous.id,
-        Number(runId !== previous.run.id), runId, owner, previous.run.task.id);
+        Number(runId !== previous.run.id), track ? 'pending' : null, runId, owner, previous.run.task.id);
       const saved = nextVersion.get(previous.id, owner);
       const record = saved ? readRecord(String(saved.id), owner) : undefined;
       return { record: record?.run.id === runId && (record.conclusion ?? '') === conclusion ? record : undefined, created: changes === 1 };
+    },
+    completeTrackerDelivery(id: string, delivery: TrackerDelivery) {
+      if (delivery.status !== 'pending') completeDelivery.run(delivery.status, delivery.status === 'delivered' ? delivery.id : null, id);
     },
     readReplay(id: string, owner: DemoIdentityId) {
       const row = latestReplay.get(id, owner);

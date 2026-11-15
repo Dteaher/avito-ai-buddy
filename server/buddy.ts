@@ -6,7 +6,7 @@ import { generateReply, ModelResponseError, readProvider, type DialogueMessage, 
 import { priceIntent, priceReplies } from './price-guide.ts';
 import { sortTask } from './price-scenario.ts';
 import { isObject } from './scenario.ts';
-import { archiveDraftText, draftFor, escalation, guideFeedback, guidePlan, pricePlanNote, workflowContract } from './buddy-workflow.ts';
+import { draftFor, escalation, guideFeedback, guidePlan, inventoryDraftText, pricePlanNote, workflowContract } from './buddy-workflow.ts';
 
 const clarificationLifetime = 10 * 60 * 1000;
 const conversationLifetime = 30 * 60 * 1000;
@@ -122,7 +122,7 @@ export function createBuddy(env: NodeJS.ProcessEnv, observeModelAttempt?: () => 
         kind: 'insufficient', mode: 'guide', sources: [], text: 'Сначала выполни проверку или открой доступный прогон.',
       };
       const local: Reply = task.comparison
-        ? { kind: 'insufficient', text: 'В инструкции поручения есть правила основного запроса и фильтра по активным товарам. Какую часть выдачи нужно проверить?', rules: [] }
+        ? { kind: 'insufficient', text: 'В инструкции есть правила общей выдачи и фильтра по активным товарам. Какую часть выдачи нужно проверить?', rules: [] }
         : price ? priceReplies[priceIntent(query, followUp === 'price')] : replies[guideIntent(query, followUp)];
       const groundingTask = run?.task ?? task;
       const evidence = buddyEvidence(groundingTask, run);
@@ -182,7 +182,7 @@ export function createBuddy(env: NodeJS.ProcessEnv, observeModelAttempt?: () => 
           const text = checkId === 'price-asc'
             ? (answer.kind === 'draft' && pricePlanNote(query) ? answer.text
               : 'По пункту 2 карточку без цены оставляем в выдаче и ставим последней. Сравни позиции всех трёх карточек.')
-            : checkId && groundingTask.comparison ? archiveDraftText(groundingTask, checkId) : generated.text;
+            : checkId && groundingTask.comparison ? inventoryDraftText(groundingTask, checkId) : generated.text;
           answer = {
             ...(generated.kind === 'feedback' && run ? guideFeedback(run, query, reviewClaims) : generated),
             ...(checkId ? { text } : {}),

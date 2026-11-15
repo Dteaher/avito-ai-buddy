@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { ArrowDownRight, ArrowLeft, ArrowUpRight, Check, CircleAlert, LoaderCircle, MessageCircle } from 'lucide-react';
-import type { BuddyQuestion, DemoIdentity, Publication, RecordListItem, Run, Workspace as WorkspaceData } from '../shared/contracts';
+import type { BuddyQuestion, DemoIdentity, Publication, RecordListItem, Run, TrackerDelivery, Workspace as WorkspaceData } from '../shared/contracts';
 import { responseFollowsRule, responseMatchesExpectation, sameObservedResult, standLabel, summarizeRun } from '../shared/run-summary';
 import { errorMessage, post, request } from './api';
 import { Evidence, RunContext, formatTime } from './Evidence';
@@ -96,7 +96,7 @@ export function App() {
     <>
       <Header identity={identity} />
       {data?.publication ? <Record publication={data.publication} workspace={data.workspace} mode={mode} />
-        : data?.records ? <RecordList records={data.records} mentor={identity?.role === 'mentor'} offer={data.workspace.assignmentOffer} />
+        : data?.records ? <RecordList records={data.records} mentor={identity?.role === 'mentor'} catalog={data.workspace.assignmentCatalog} />
           : data ? <Workspace key={data.workspace.task.id} data={data.workspace} mode={mode} chooseMode={chooseMode} revision={data.revision} /> : (
         <main className="container initial">
           {error ? (
@@ -115,17 +115,20 @@ export function App() {
 
 const reviewLabel = { accepted: 'Результат принят', returned: 'Возвращено с комментарием' };
 
-function RecordList({ records, mentor, offer }: { records: RecordListItem[]; mentor: boolean; offer?: WorkspaceData['assignmentOffer'] }) {
-  const [assigned, setAssigned] = useState(offer?.assigned);
+function RecordList({ records, mentor, catalog }: { records: RecordListItem[]; mentor: boolean; catalog?: WorkspaceData['assignmentCatalog'] }) {
+  const [offers, setOffers] = useState(catalog?.offers ?? []);
+  const [selected, setSelected] = useState(offers[0]?.id);
+  const offer = offers.find(({ id }) => id === selected);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState('');
   async function assign() {
-    if (!offer) return;
+    if (!offer || !catalog) return;
     setPending(true);
     setError('');
     try {
-      await post('/api/assignments', { templateId: offer.id, traineeId: 'demo-trainee' });
-      setAssigned(true);
+      const { task } = await post<{ task: Run['task'] }>('/api/assignments', { templateId: offer.id, traineeId: catalog.traineeId });
+      setOffers((current) => current.map((candidate) => candidate.id === offer.id
+        ? { ...candidate, assignedVersion: task.instruction.version } : candidate));
     } catch (reason) {
       setError(errorMessage(reason));
     } finally {
@@ -138,9 +141,19 @@ function RecordList({ records, mentor, offer }: { records: RecordListItem[]; men
       <h1>{mentor ? 'Записи на ревью' : 'Мои записи'}</h1>
       {mentor && <p>Записи назначенного тебе стажёра А.</p>}
       {mentor && offer && <section id="assignment-offer" className="surface record-surface assignment-offer" aria-labelledby="assignment-title">
-        <div><h2 id="assignment-title">Следующее поручение</h2><p>{offer.title}</p>
-          <p className="fact">Тестовое назначение · {offer.id} · правило v{offer.version}</p></div>
-        {assigned ? <p role="status"><strong>Назначено стажёру А</strong></p>
+        <div className="assignment-details">
+          <h2 id="assignment-title">Следующее поручение</h2>
+          <label htmlFor="assignment-template">Шаблон проверки</label>
+          <select id="assignment-template" value={selected} disabled={pending} onChange={(event) => {
+            setSelected(event.target.value);
+            setError('');
+          }}>
+            {offers.map(({ id, title }) => <option key={id} value={id}>{id} · {title}</option>)}
+          </select>
+          <p>{offer.criterion}</p>
+          <p className="fact">Тестовое назначение · правило v{offer.assignedVersion ?? offer.version}</p>
+        </div>
+        {offer.assignedVersion ? <p role="status"><strong>Назначено стажёру А</strong></p>
           : <button type="button" className="button primary" disabled={pending} onClick={() => void assign()}>
             {pending ? 'Назначаем…' : 'Назначить стажёру А'}
           </button>}
@@ -160,13 +173,15 @@ function RecordList({ records, mentor, offer }: { records: RecordListItem[]; men
 
 function Record({ publication: initial, workspace, mode }: { publication: Publication; workspace: WorkspaceData; mode?: BuddyQuestion['mode'] }) {
   const [publication, setPublication] = useState(initial);
-  const { id, run, publishedAt, conclusion, review, replay, replayBy, previous, nextId } = publication;
+  const { id, run, publishedAt, conclusion, review, replay, replayBy, previous, nextId, tracker } = publication;
   const instruction = useRef<HTMLDialogElement>(null);
   const [comment, setComment] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [replaying, setReplaying] = useState(false);
   const [replayError, setReplayError] = useState('');
+  const [sending, setSending] = useState(false);
+  const [deliveryError, setDeliveryError] = useState('');
   const [fixed, setFixed] = useState(Boolean(workspace.standFixed));
   const [switchingStand, setSwitchingStand] = useState(false);
   const [checkingReplay, setCheckingReplay] = useState(false);
@@ -180,6 +195,13 @@ function Record({ publication: initial, workspace, mode }: { publication: Public
   const evidenceRun = useReplay && replay ? replay : run;
   const canRevise = !mentor && review?.decision === 'returned' && !nextId;
 
+  function openOriginal() {
+    const source = document.getElementById(`result-evidence-${run.checks[0].id}`);
+    source?.querySelectorAll('details').forEach((details) => { details.open = true; });
+    source?.querySelector('summary')?.focus({ preventScroll: true });
+    source?.scrollIntoView({ block: 'start' });
+  }
+
   async function decide(decision: 'accepted' | 'returned') {
     setBusy(true);
     setError('');
@@ -190,6 +212,18 @@ function Record({ publication: initial, workspace, mode }: { publication: Public
       setError(errorMessage(reason));
     } finally {
       setBusy(false);
+    }
+  }
+  async function retryDelivery() {
+    setSending(true);
+    setDeliveryError('');
+    try {
+      const updated = await post<TrackerDelivery>(`/api/records/${id}/tracker`);
+      setPublication((previous) => ({ ...previous, tracker: updated }));
+    } catch (reason) {
+      setDeliveryError(errorMessage(reason));
+    } finally {
+      setSending(false);
     }
   }
   async function repeat() {
@@ -243,9 +277,30 @@ function Record({ publication: initial, workspace, mode }: { publication: Public
         <section className="surface record-surface">
           <div className="record-banner">
             <span className="signal ok"><Check size={17} /></span>
-            <div><strong>Опубликовано в тестовом трекере</strong><code>{id}</code></div>
+            <div><strong>Запись сохранена</strong><code>{id}</code></div>
             <time dateTime={publishedAt}>{formatTime(publishedAt)}</time>
           </div>
+          <section className="record-summary" aria-label="Передача результата">
+          <p className="record-conclusion"><strong>Вывод стажёра</strong>{conclusion || 'Вывод не добавлен.'}</p>
+          {tracker && <div className="tracker-delivery">
+            <div role="status">
+              {tracker.status === 'delivered' && <><strong>Доставлено в демо-трекер</strong><code>{tracker.id}</code></>}
+              {tracker.status === 'pending' && <>
+                <strong>{sending ? 'Отправляем в демо-трекер…' : 'Трекер ещё не подтвердил получение'}</strong>
+                {!sending && <p className="fact">{mentor ? 'Стажёр может повторить отправку.' : 'Повтори отправку из этой записи. Снимок и вывод сохранены.'}</p>}
+              </>}
+              {tracker.status === 'blocked' && <><strong>Трекер отклонил отправку</strong><p className="fact">Запись доступна для ревью. Сообщи об отказе ответственному за трекер.</p></>}
+            </div>
+            {tracker.status === 'pending' && !mentor && <button type="button" className="button primary" disabled={sending} onClick={() => void retryDelivery()}>
+              Повторить отправку
+            </button>}
+            {deliveryError && <p className="action-error" role="alert">{deliveryError}</p>}
+          </div>}
+          {mentor && <div className="record-source-actions">
+            <button type="button" className="text-link" onClick={() => showInstruction(instruction.current)}>Открыть правило</button>
+            <button type="button" className="text-link" onClick={openOriginal}>Открыть исходный ответ</button>
+          </div>}
+          </section>
           <section className="record-summary" aria-label="Резюме проверки">
             <h2>Что проверили</h2>
             <p>{task.description}</p>
@@ -253,7 +308,6 @@ function Record({ publication: initial, workspace, mode }: { publication: Public
             {run.preparation && <p className="record-conclusion"><strong>Вопрос стажёра</strong>{run.preparation.question}</p>}
             <p>Источник ожидания · {run.preparation ? 'на основе черновика Buddy' : 'ручной ввод'} по инструкции команды.</p>
             {summarizeRun(run).map((fact) => <p className="fact" key={fact}>{fact}</p>)}
-            <p className="record-conclusion"><strong>Вывод стажёра</strong>{conclusion || 'Вывод не добавлен.'}</p>
             {previous && <section className="revision-context" aria-label="Предыдущая версия">
               <a href={`/records/${previous.id}`} className="text-link">Предыдущая версия <ArrowUpRight size={15} /></a>
               <p>{previous.runId === run.id ? 'Исправлен вывод. Использован исходный прогон.' : 'Исправление опирается на другой сохранённый прогон.'}</p>
@@ -267,12 +321,12 @@ function Record({ publication: initial, workspace, mode }: { publication: Public
           <section className="record-summary" aria-label="Повтор проверки">
             {mentor ? <details className="response-details stand-switch">
               <summary>Демо-стенд · {fixed ? 'исправный ответ' : 'ответ с дефектом'}</summary>
-              <p>Настройка действует на обе задачи в этом локальном запуске.</p>
+              <p>Настройка действует на тестовые поручения в этом запуске.</p>
               <button type="button" className="button secondary" disabled={switchingStand || replaying} onClick={() => void changeStand()}>
                 {fixed ? 'Вернуть дефект на стенд' : 'Включить исправный ответ'}
               </button>
             </details> : workspace.identity && <p className="fact">Демо-стенд сейчас · {fixed ? 'исправный ответ' : 'ответ с дефектом'}</p>}
-            <button type="button" className="button secondary" disabled={replaying || switchingStand || busy || editing} onClick={() => void repeat()}>
+            <button type="button" className={`button ${mentor && !replay && !review ? 'primary' : 'secondary'}`} disabled={replaying || switchingStand || busy || editing} onClick={() => void repeat()}>
               {replaying ? 'Повторяем запрос…' : 'Повторить проверку'}
             </button>
             {replayError && <p role="alert" className="action-error">{replayError}</p>}
@@ -311,13 +365,13 @@ function Record({ publication: initial, workspace, mode }: { publication: Public
           <RunContext run={run} showRules />
           <Evidence run={run} anchorPrefix="result-evidence" />
           {!mentor && task.id === 'SEARCH-01' && <NextTask />}
-          {!mentor && task.id === 'SORT-01' && workspace.tasks.some(({ comparison }) => comparison) &&
-            <a className="text-link" href="/?task=ARCHIVE-01">Следующее поручение · архивные товары <ArrowUpRight size={15} /></a>}
+          {!mentor && task.id === 'SORT-01' && workspace.tasks.filter(({ comparison }) => comparison).map(({ id, shortTitle, title }) =>
+            <a key={id} className="text-link" href={`/?task=${id}`}>{shortTitle ?? title} <ArrowUpRight size={15} /></a>)}
         </section>
         <div className="record-sidebar">
           <section className="surface review-panel" aria-labelledby="review-title">
             <h2 id="review-title" tabIndex={-1}>Решение наставника</h2>
-            {mentor && workspace.assignmentOffer && !workspace.assignmentOffer.assigned &&
+            {mentor && workspace.assignmentCatalog?.offers.some(({ assignedVersion }) => !assignedVersion) &&
               <a className="text-link" href="/?records=1#assignment-offer">Назначить следующее поручение <ArrowUpRight size={15} /></a>}
             {review ? <div role="status">
               <p><strong>{reviewLabel[review.decision]}</strong> · <time dateTime={review.reviewedAt}>{formatTime(review.reviewedAt)}</time></p>
@@ -327,7 +381,7 @@ function Record({ publication: initial, workspace, mode }: { publication: Public
               <p>Прими запись, если по ней можно воспроизвести проверку или разобраться в описанном дефекте.</p>
               <label htmlFor="mentor-comment">Комментарий наставника</label>
               <textarea id="mentor-comment" value={comment} onChange={(event) => setComment(event.target.value)} maxLength={1000} rows={3} />
-              <button type="button" className="button primary" disabled={busy} onClick={() => void decide('accepted')}>Принять результат</button>
+              <button type="button" className={`button ${replay ? 'primary' : 'secondary'}`} disabled={busy} onClick={() => void decide('accepted')}>Принять результат</button>
               <button type="button" className="button secondary" disabled={busy || !comment.trim()} onClick={() => void decide('returned')}>Вернуть с комментарием</button>
               {busy && <p role="status">Сохраняем решение…</p>}
               {error && <p className="action-error" role="alert">{error}</p>}

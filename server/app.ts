@@ -1,13 +1,14 @@
 import { randomBytes } from 'node:crypto';
 import { resolve } from 'node:path';
 import express, { type ErrorRequestHandler, type Request, type RequestHandler } from 'express';
-import type { AttemptChoice, CheckInput, DemoIdentity, Preparation, Task, Workspace } from '../shared/contracts.ts';
+import type { AttemptChoice, CheckInput, DemoIdentity, Preparation, Publication, Task, Workspace } from '../shared/contracts.ts';
 import { parseBuddyQuestion, type createBuddy } from './buddy.ts';
 import { executeRun, isObject, listings, parseChecks, setPlan, task } from './scenario.ts';
 import { executePriceRun, parsePriceCheck, priceCheck, priceItems, sortTask } from './price-scenario.ts';
 import type { createStore } from './store.ts';
 import { assignedTrainee, findIdentity, identities } from './demo-identities.ts';
-import { archiveTask, products } from './archive-scenario.ts';
+import { inventoryTasks, products } from './archive-scenario.ts';
+import type { SendToTracker } from './tracker.ts';
 
 const demoTasks = [task, sortTask];
 
@@ -20,17 +21,28 @@ interface AppOptions {
   store: ReturnType<typeof createStore>;
   standOrigin: () => string;
   buddy: ReturnType<typeof createBuddy>;
+  tracker?: SendToTracker;
   staticDir?: string;
 }
 
-export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) {
+export function createApp({ store, standOrigin, buddy, tracker, staticDir }: AppOptions) {
   const app = express();
   app.disable('x-powered-by');
   const cookieName = 'buddy_session';
   let standFixed = false;
   const inventoryHeaders = { 'X-Demo-Inventory-Key': randomBytes(24).toString('hex') };
   const taskFor = (id: unknown, owner: DemoIdentity['id']) => demoTasks.find((candidate) => candidate.id === id)
-    ?? (id === archiveTask.id ? store.assignment(archiveTask.id, owner) : undefined);
+    ?? (typeof id === 'string' ? store.assignment(id, owner) : undefined);
+  async function deliver(record: Publication, owner: DemoIdentity['id']) {
+    if (!tracker || record.tracker?.status !== 'pending') return record;
+    const { run, id, url, conclusion } = record;
+    const result = await tracker({ taskId: run.task.id, publicationId: id, runId: run.id,
+      ruleId: run.task.instruction.id, ruleVersion: run.task.instruction.version,
+      localEvidenceUrl: url, conclusion: conclusion ?? '',
+    });
+    store.completeTrackerDelivery(id, result);
+    return store.readRecord(id, owner) ?? record;
+  }
   const sessionLifetime = 30 * 24 * 60 * 60 * 1000;
   const tokenFrom = (req: Request) => req.headers.cookie?.match(/(?:^|;\s*)buddy_session=([0-9a-f]{48})(?:;|$)/)?.[1];
   const identityFrom = (req: Request) => {
@@ -75,7 +87,7 @@ export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) 
     res.json({ items: standFixed && !filters.length ? listings : listings.filter(({ city }) => city === 'kazan') });
   });
 
-  app.get('/demo/inventory', (req, res) => {
+  app.get(['/demo/inventory', '/demo/inventory/filter-check'], (req, res) => {
     if (req.get('X-Demo-Inventory-Key') !== inventoryHeaders['X-Demo-Inventory-Key']) {
       res.sendStatus(404);
       return;
@@ -87,7 +99,9 @@ export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) 
     }
     res.set('X-Avito-Demo-Stand', standFixed ? 'fixed' : 'defect');
     res.set('Cache-Control', 'no-store');
-    res.json({ items: standFixed && !filters.length ? products : products.filter(({ status }) => status === 'active') });
+    const filterCheck = req.path === '/demo/inventory/filter-check';
+    const includeArchived = filterCheck ? !filters.length || !standFixed : standFixed && !filters.length;
+    res.json({ items: includeArchived ? products : products.filter(({ status }) => status === 'active') });
   });
 
   app.use('/api', (_req, res, next) => {
@@ -104,11 +118,14 @@ export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) 
       return;
     }
     if (!existing) setSession(res, identity);
-    const assigned = store.assignment(archiveTask.id, identity.id);
-    const tasks = assigned ? [...demoTasks, assigned] : demoTasks;
-    const context = { tasks, identity, standFixed, buddyMode: buddy.mode, buddyProvider: buddy.provider,
-      assignmentOffer: identity.role === 'mentor' ? { id: archiveTask.id, title: archiveTask.title,
-        version: archiveTask.instruction.version, assigned: Boolean(store.assignment(archiveTask.id, assignedTrainee(identity.id))) } : undefined };
+    const tasks = [...demoTasks, ...inventoryTasks.flatMap(({ id }) => store.assignment(id, identity.id) ?? [])];
+    const traineeId = assignedTrainee(identity.id);
+    const assignmentCatalog = identity.role === 'mentor' ? { traineeId,
+      offers: inventoryTasks.map(({ id, title, criterion, instruction }) => ({ id, title, criterion,
+        version: instruction.version, assignedVersion: store.assignment(id, traineeId)?.instruction.version,
+      })),
+    } : undefined;
+    const context = { tasks, identity, standFixed, buddyMode: buddy.mode, buddyProvider: buddy.provider, assignmentCatalog };
     const workspace: Workspace = selected === sortTask.id
       ? { ...context, kind: 'price-order', task: sortTask, checks: [priceCheck], orderItems: priceItems }
       : { ...context, task: current, checks: setPlan(current).checks.map(({ id, label, path, parameter }) => ({ id, label, path, parameter })),
@@ -154,12 +171,13 @@ export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) 
       return;
     }
     const traineeId = assignedTrainee(mentor.id);
-    if (req.body?.templateId !== archiveTask.id || req.body?.traineeId !== traineeId) {
+    const template = inventoryTasks.find(({ id }) => id === req.body?.templateId);
+    if (!template || req.body?.traineeId !== traineeId) {
       res.status(400).json({ message: 'Выбери поручение и своего стажёра.' });
       return;
     }
-    const created = store.assign(archiveTask, traineeId, mentor.id);
-    res.status(created ? 201 : 200).json({ task: store.assignment(archiveTask.id, traineeId), traineeId });
+    const created = store.assign(template, traineeId, mentor.id);
+    res.status(created ? 201 : 200).json({ task: store.assignment(template.id, traineeId), traineeId });
   });
 
   app.get('/api/tasks/:taskId/instruction', assignedTask, (_req, res) => {
@@ -282,18 +300,19 @@ export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) 
     res.status(201).json(run);
   });
 
-  app.post('/api/tasks/:taskId/runs/:runId/publication', assignedTask, (req, res) => {
+  app.post('/api/tasks/:taskId/runs/:runId/publication', assignedTask, async (req, res) => {
     const conclusion = req.body?.conclusion ?? '';
     if (typeof conclusion !== 'string' || conclusion.length > 1000) {
       res.status(400).json({ message: 'Вывод должен содержать не более 1000 символов.' });
       return;
     }
-    const { record, created } = store.publish(String(req.params.runId), res.locals.identity.id, String(req.params.taskId), conclusion.trim());
+    const owner: DemoIdentity['id'] = res.locals.identity.id;
+    const { record, created } = store.publish(String(req.params.runId), owner, String(req.params.taskId), conclusion.trim(), Boolean(tracker));
     if (!record) {
       res.status(404).json({ message: 'Прогон недоступен в этой сессии.' });
       return;
     }
-    res.status(created ? 201 : 200).json(record);
+    res.status(created ? 201 : 200).json(await deliver(record, owner));
   });
 
   app.get('/api/records', (_req, res) => {
@@ -309,7 +328,17 @@ export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) 
     res.json({ ...record, ...store.readReplay(record.id, assignedTrainee(res.locals.identity.id)) });
   });
 
-  app.post('/api/records/:id/revisions', (req, res) => {
+  app.post('/api/records/:id/tracker', async (req, res) => {
+    const identity: DemoIdentity = res.locals.identity;
+    const record = identity.role === 'trainee' ? store.readRecord(req.params.id, identity.id) : undefined;
+    if (!record?.tracker || !taskFor(record.run.task.id, identity.id)) {
+      res.status(404).json({ message: 'Отправка недоступна в этой сессии.' });
+      return;
+    }
+    res.json((await deliver(record, identity.id)).tracker);
+  });
+
+  app.post('/api/records/:id/revisions', async (req, res) => {
     const identity: DemoIdentity = res.locals.identity;
     const previous = identity.role === 'trainee' ? store.readRecord(req.params.id, identity.id) : undefined;
     if (!previous) {
@@ -330,12 +359,12 @@ export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) 
       res.status(404).json({ message: 'Прогон недоступен в этой задаче.' });
       return;
     }
-    const { record, created } = store.revise(previous, identity.id, runId, conclusion.trim());
+    const { record, created } = store.revise(previous, identity.id, runId, conclusion.trim(), Boolean(tracker));
     if (!record) {
       res.status(409).json({ message: 'Версия или публикация уже существует. Обнови запись.' });
       return;
     }
-    res.status(created ? 201 : 200).json(record);
+    res.status(created ? 201 : 200).json(await deliver(record, identity.id));
   });
 
   app.post('/api/records/:id/replay', async (req, res) => {

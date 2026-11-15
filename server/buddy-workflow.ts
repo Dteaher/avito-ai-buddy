@@ -26,8 +26,8 @@ export function workflowContract(task: Task, intent: WorkflowReply['intent'], gu
     intent, checks: [], claims: Object.keys(claims).flatMap((key) => [key, 'not-' + key]),
     hint: [
       'Извлеки только тезисы, которые стажёр сообщает как факт. Сохрани отрицание префиксом not-. Сомнение, вопрос, условие, причина и пересказ чужого мнения не являются тезисами стажёра. Если смысл неясен, верни claims=[].',
-      'Верни kind=feedback, text="Вывод разобран" и claims, в котором только ID утверждений, явно сделанных стажёром. Если оба запроса работают, отметь main-correct и control-correct. Если стажёр упоминает контрольный запрос, не приписывай ему вывод о запросе без фильтра.',
-      task.comparison ? 'Фразу «Без фильтра пропали архивные товары» обозначь как main-missing-archive. Для темы вне задачи верни insufficient, sources=[] и claims=[].'
+      'Верни kind=feedback, text="Вывод разобран" и claims, в котором только ID утверждений, явно сделанных стажёром. Если оба запроса работают, отметь main-correct и control-correct. Сохраняй привязку каждого утверждения к описанному запросу.',
+      task.comparison ? 'Фразу «Без фильтра пропали архивные товары» обозначь как main-missing-archive, а «При status=active вернулись архивные» как filtered-has-archive. Для темы вне задачи верни insufficient, sources=[] и claims=[].'
         : 'Пример: «числа возрастают, значит порядок верный» даёт numeric-ascending и sort-correct. Для тезиса «карточка без цены пропала» верни null-missing, даже если тезис ложный. «карточка без цены не пропала» даёт not-null-missing. Аналогично «Самары нет» даёт main-missing-samara. Для темы вне задачи верни insufficient, sources=[] и claims=[].',
       `Утверждения: ${JSON.stringify(claims)}`,
     ].join('\n'),
@@ -40,8 +40,8 @@ export function workflowContract(task: Task, intent: WorkflowReply['intent'], gu
     intent, checks: selections, clarificationRequired, draftRequired: Boolean(selected),
     hint: [
       'Стажёр описывает предполагаемую проверку своими словами. Верни draft, если можно выбрать запрос. Признай верную часть ожидания, объясни ошибку или уточни, чего не хватает.',
-      'В draft укажи один checkId и его expected из каталога в заданном порядке. Это ожидаемое по правилу, даже если стажёр предложил другое. В rule:1 описан основной запрос, в rule:2 контрольный запрос или карточка без цены.',
-      task.comparison ? 'Основное поручение проверяет сохранение архивных товаров. Успешный status=active проверяет фильтр. Если сформулирована пропажа товара в общей выдаче, выбери all-statuses.'
+      'В draft укажи один checkId и его expected из каталога в заданном порядке. Это ожидаемое по правилу, даже если стажёр предложил другое. Указывай номер пункта по выбранному запросу.',
+      task.comparison ? `Критерий: ${task.criterion} Запрос для проверки поручения: ${task.comparison.checks[0].id}. Пункт 1 — общая выдача, пункт 2 — status=active.`
         : 'Для SORT-01 объясни, зачем учитывать объявление без цены. Для SEARCH-01 при неизвестном фильтре задай один вопрос: был ли запрос без фильтра или с city=kazan. Упоминание Казани в ответе не означает, что город задан в запросе.',
       'Для clarification и insufficient передай пустые checkId, expected и sources.',
       clarificationRequired
@@ -56,17 +56,23 @@ export function workflowContract(task: Task, intent: WorkflowReply['intent'], gu
 
 export function guidePlan(task: Task, query: string, followUp?: Reply['followUp']): BuddyAnswer | undefined {
   if (task.comparison) {
-    const control = /status\s*=\s*active|контроль|фильтр по активн/.test(query);
-    const primary = /без (?:фильтра|параметр)|фильтра не было|достаточно|хватит/.test(query) || (!control && /архив/.test(query))
+    const [diagnostic, baseline] = task.comparison.checks;
+    const filtered = /status\s*=\s*active|фильтр по активн|запрос по активн/.test(query);
+    const unfiltered = /без (?:фильтра|параметр)|фильтра не было|общ.{0,10}выдач|полн.{0,8}список/.test(query)
       || (followUp === 'filter' && /^нет[.!? ]*$/.test(query));
-    if (!control && !primary) {
+    let checkId: CheckDraft['checkId'] | undefined;
+    if (/достаточно|хватит|как выбрать запрос/.test(query)) checkId = diagnostic.id;
+    else if (unfiltered) checkId = 'all-statuses';
+    else if (filtered) checkId = 'active-only';
+    else if (/контроль/.test(query)) checkId = baseline.id;
+    else if (/архив/.test(query)) checkId = diagnostic.id;
+    if (!checkId) {
       if (/активн|одн.{0,6}групп/.test(query)) return {
         kind: 'clarification', text: 'Запрос был без фильтра или с status=active?', mode: 'guide', sources: [],
       };
       return;
     }
-    const checkId = primary ? 'all-statuses' : 'active-only';
-    return { kind: 'draft', mode: 'guide', draft: draftFor(task, checkId), text: archiveDraftText(task, checkId),
+    return { kind: 'draft', mode: 'guide', draft: draftFor(task, checkId), text: inventoryDraftText(task, checkId),
       sources: [{ instructionId: task.instruction.id, ruleNumber: checkRuleNumber(checkId) }] };
   }
   const price = task.id === sortTask.id;
@@ -97,9 +103,12 @@ export function guidePlan(task: Task, query: string, followUp?: Reply['followUp'
     sources: [{ instructionId: task.instruction.id, ruleNumber: checkId === 'without-city' ? 1 : 2 }] };
 }
 
-export function archiveDraftText(task: Task, id: DraftCheck['id']) {
+export function inventoryDraftText(task: Task, id: DraftCheck['id']) {
   const number = checkRuleNumber(id);
-  return `Пункт ${number}. ${task.instruction.rules[number - 1]} Успешный контроль по активным товарам проверяет фильтр. Чтобы обнаружить пропажу архивных товаров, нужен запрос без фильтра.`;
+  const comparison = task.comparison?.checks[0].id === 'active-only'
+    ? 'Общая выдача подтверждает, что архивные товары есть на стенде. Чтобы проверить, исключает ли их фильтр, выполни запрос с status=active.'
+    : 'Успешный контроль по активным товарам проверяет фильтр. Чтобы обнаружить пропажу архивных товаров, нужен запрос без фильтра.';
+  return `Пункт ${number}. ${task.instruction.rules[number - 1]} ${comparison}`;
 }
 
 export function pricePlanNote(query: string) {

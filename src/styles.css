@@ -40,14 +40,14 @@ code, .task-key { font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', mo
 .environment { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted); font-weight: 650; white-space: nowrap; }
 .environment i { width: 7px; height: 7px; border-radius: 50%; background: #24a15b; }
 .identity-picker, .workflow-tools label { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; font-weight: 630; }
-.identity-picker select, .workflow-tools select {
+.identity-picker select, .workflow-tools select, .assignment-details select {
   max-width: 100%; min-height: 36px; padding: 4px 8px; border: 1px solid #c5d2e3;
   border-radius: 8px; background: #fff; color: var(--ink); font: inherit;
 }
 .workflow-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px; margin: 10px 0 4px; }
 .workflow-tools .text-link { font-size: 13px; }
 select:focus-visible, textarea:focus-visible { outline: 3px solid #7d43e3; outline-offset: 2px; }
-.first-task-note { margin: 0 0 14px; color: var(--muted); font-size: 14px; line-height: 1.5; }
+.first-task-note { margin: 0 0 14px; color: var(--muted); font-size: 14px; line-height: 1.5; overflow-wrap: anywhere; }
 .rule-expectation { margin-bottom: 15px; }
 .rule-expectation p, .escalation p { margin: 10px 0; line-height: 1.5; }
 .draft-preview { display: grid; justify-items: start; gap: 7px; margin: 6px 0; padding: 10px 12px; border-left: 3px solid #a7c9f7; background: #f3f7fd; overflow-wrap: anywhere; font-size: 13px; }
@@ -70,6 +70,10 @@ select:focus-visible, textarea:focus-visible { outline: 3px solid #7d43e3; outli
 .record-summary { display: grid; gap: 8px; margin: 17px 0; }
 .record-summary > .button { justify-self: start; }
 .assignment-offer { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 16px; margin: 16px 0; }
+.assignment-details { flex: 1 1 290px; display: grid; gap: 8px; min-width: 0; }
+.assignment-details label { font-size: 13px; font-weight: 700; }
+.assignment-details select { width: 100%; min-height: 42px; text-overflow: ellipsis; }
+.assignment-details p { margin: 0; }
 .assignment-offer h2, .attempt-evidence h3 { font-size: 1rem; margin: 0 0 6px; }
 .attempt-pick { display: flex; flex-wrap: wrap; gap: 10px 18px; margin: 12px 0; border: 1px solid var(--line); padding: 10px 12px; border-radius: 10px; }
 .attempt-pick legend, .attempt-evidence dt { font-weight: 650; }
@@ -282,6 +286,12 @@ details[open] > summary > .disclosure { transform: rotate(180deg); }
 .record-banner strong { display: block; font-size: 15px; }
 .record-banner code { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .record-banner time { margin-left: auto; font-size: 12px; color: var(--muted); }
+.record-source-actions { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+.record-source-actions .text-link { min-height: 35px; }
+.publication-status { margin: 8px 0; font-size: 14px; color: var(--muted); overflow-wrap: anywhere; }
+.tracker-delivery { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); font-size: 14px; overflow-wrap: anywhere; }
+.tracker-delivery code { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; }
+.tracker-delivery .fact, .tracker-delivery .action-error { margin: 4px 0 0; }
 .signal { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 50%; }
 .signal.ok { background: var(--green-bg); color: var(--green); }
 .footer { margin-top: 25px; min-height: 57px; border-top: 1px solid var(--line); color: #635c68; font-size: 11px; font-weight: 550; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
