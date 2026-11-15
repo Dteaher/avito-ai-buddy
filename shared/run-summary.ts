@@ -18,6 +18,20 @@ export function sameObservedResult(first: Run, second: Run) {
   return JSON.stringify(observed(first)) === JSON.stringify(observed(second));
 }
 
+export function standLabel(run: Run) {
+  const modes = new Set(run.checks.map(({ standMode }) => standMode));
+  if (modes.size > 1) return 'Состояние различалось между запросами';
+  if (modes.has('fixed')) return 'Демо-стенд исправлен';
+  if (modes.has('defect')) return 'Демо-стенд с дефектом';
+  return 'Состояние стенда не записано';
+}
+
+export function responseFollowsRule(check: Run['checks'][number]) {
+  return 'ruleCities' in check
+    ? check.actualCities.length === check.ruleCities.length && check.ruleCities.every((city) => check.actualCities.includes(city))
+    : priceObservations(check).followsRule;
+}
+
 export function summarizeRun(run: Run) {
   return run.checks.map((check) => {
     const request = `GET ${check.path} · HTTP ${check.status}.`;

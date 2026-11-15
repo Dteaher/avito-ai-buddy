@@ -31,6 +31,37 @@ beforeAll(async () => {
 afterAll(() => new Promise<void>((resolve) => server.close(() => resolve())));
 
 describe('Review of conclusions against real snapshots', () => {
+  it('reports evidence for doubt without attributing an assertion', () => {
+    const answer = guideFeedback(sortFixed, 'не могу сказать, что карточка без цены пропала', ['null-missing']);
+    expect(answer.verdicts?.map(({ status }) => status)).not.toContain('refuted');
+    expect(answer.text).toMatch(/присутствует.*3/i);
+  });
+  it.each([
+    'Пока не уверен, есть ли она в выдаче',
+    'Карточка без цены пропала?',
+    'Если она пропала, может быть, её отсеял фильтр?',
+    'Коллега написал, что карточка пропала. Я хочу проверить.',
+    '«Карточка без цены пропала», — написал коллега.',
+    'Не берусь утверждать, что карточку без ценника потеряли.',
+  ])('shows observations rather than scoring %s', (question) => {
+    const answer = guideFeedback(sortFixed, question.toLowerCase(), ['null-missing', 'sort-correct']);
+    expect(answer.verdicts?.map(({ status }) => status)).toEqual(['observation']);
+    expect(answer.text).toMatch(/присутствует.*3/i);
+    expect(answer.sources).toContainEqual(expect.objectContaining({ runId: sortFixed.id, checkId: 'price-asc' }));
+  });
+  it('evaluates the asserted clause after a qualified one', () => {
+    const answer = guideFeedback(sortFixed, 'не могу сказать, что карточка без цены пропала, но числовые цены возрастают',
+      ['null-missing', 'not-numeric-ascending', 'sort-correct']);
+    expect(answer.verdicts?.map(({ status }) => status)).toEqual(['confirmed', 'observation']);
+    expect(answer.text).toMatch(/числовые цены действительно возрастают/i);
+  });
+  it('keeps doubt and control observations scoped in SEARCH-01', () => {
+    const answer = guideFeedback(searchFixed, 'не уверен, что самара пропала без фильтра. в контроле самары нет.',
+      ['main-missing-samara', 'not-control-correct']);
+    expect(answer.verdicts?.map(({ status }) => status)).toEqual(['confirmed', 'observation']);
+    expect(answer.verdicts?.[0].text).toMatch(/контрольном запросе/i);
+    expect(answer.verdicts?.[1].text).toMatch(/без фильтра.*самара присутствует/i);
+  });
   const price = [
     [true, 'Карточка без цены последняя', ['null-last'], ['confirmed']],
     [true, 'Карточка без цены пропала', ['null-missing'], ['refuted']],
@@ -59,7 +90,7 @@ describe('Review of conclusions against real snapshots', () => {
   it('separates guesses about causes from facts and asks what to check', () => {
     const answer = guideFeedback(searchBroken, 'может это кэш или пагинация?', []);
     expect(answer.text).toMatch(/гипотез/i);
-    expect(answer.verdicts).toEqual([{ status: 'unclear', text: expect.stringMatching(/уточни/i) }]);
+    expect(answer.verdicts).toEqual([{ status: 'observation', text: expect.stringMatching(/стенд вернул/i) }]);
   });
   it('keeps explicit polarity if the model reverses it or adds a fabricated claim', () => {
     const price = guideFeedback(sortFixed, 'карточка без цены пропала', ['not-null-missing', 'sort-correct']);

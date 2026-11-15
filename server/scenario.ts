@@ -72,12 +72,14 @@ export async function fetchStand(origin: string, path: string, signal: AbortSign
     throw new Error('Invalid stand response');
   }
   const items: unknown[] = data.items;
-  return { items, rawBody, status: response.status };
+  const mode = response.headers.get('x-avito-demo-stand');
+  const standMode: 'defect' | 'fixed' | undefined = mode === 'defect' || mode === 'fixed' ? mode : undefined;
+  return { items, rawBody, status: response.status, standMode };
 }
 
 async function checkResponse(origin: string, input: CheckInput, signal: AbortSignal): Promise<CheckResult> {
   const check = checks.find(({ id }) => id === input.id)!;
-  const { items, rawBody, status } = await fetchStand(origin, check.path, signal);
+  const { items, rawBody, status, standMode } = await fetchStand(origin, check.path, signal);
   if (!items.every(isListing)) throw new Error('Invalid city listings');
   const actualCities = [...new Set(items.map(({ city }) => city))];
   const expectedCities = [...input.expectedCities];
@@ -85,7 +87,7 @@ async function checkResponse(origin: string, input: CheckInput, signal: AbortSig
   const missing = expectedCities.filter((city) => !actualCities.includes(city));
   const extra = actualCities.filter((city) => !expectedCities.includes(city));
   return {
-    ...check, expectedCities, status, items, rawBody, actualCities,
+    ...check, expectedCities, status, standMode, items, rawBody, actualCities,
     ruleCities: required, missing, extra, matches: missing.length + extra.length === 0,
     followsRule: expectedCities.length === required.length && required.every((city) => expectedCities.includes(city)),
   };

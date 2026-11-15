@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { ArrowDownRight, ArrowLeft, ArrowUpRight, Check, CircleAlert, LoaderCircle, MessageCircle } from 'lucide-react';
 import type { BuddyQuestion, DemoIdentity, Publication, RecordListItem, Run, Workspace as WorkspaceData } from '../shared/contracts';
-import { sameObservedResult, summarizeRun } from '../shared/run-summary';
+import { responseFollowsRule, sameObservedResult, standLabel, summarizeRun } from '../shared/run-summary';
 import { errorMessage, post, request } from './api';
 import { Evidence, RunContext, formatTime } from './Evidence';
 import { NextTask, Workspace } from './Workspace';
@@ -145,10 +145,13 @@ function Record({ publication: initial, workspace, mode }: { publication: Public
   const [checkingReplay, setCheckingReplay] = useState(false);
   const [replayConclusion, setReplayConclusion] = useState(conclusion ?? '');
   const [editing, setEditing] = useState(false);
+  const [useReplay, setUseReplay] = useState(false);
   const [revisedConclusion, setRevisedConclusion] = useState(conclusion ?? '');
   const mentor = workspace.identity?.role === 'mentor';
   const task = run.task;
   const buddyContext = { task, kind: run.kind, buddyMode: workspace.buddyMode, buddyProvider: workspace.buddyProvider };
+  const evidenceRun = useReplay && replay ? replay : run;
+  const canRevise = !mentor && review?.decision === 'returned' && !nextId;
 
   async function decide(decision: 'accepted' | 'returned') {
     setBusy(true);
@@ -170,6 +173,7 @@ function Record({ publication: initial, workspace, mode }: { publication: Public
       setPublication((previous) => ({ ...previous, replay: result, replayBy: workspace.identity?.id }));
       setCheckingReplay(false);
       setReplayConclusion(conclusion ?? '');
+      setUseReplay(false);
     } catch (reason) {
       setReplayError(errorMessage(reason));
     } finally {
@@ -192,7 +196,7 @@ function Record({ publication: initial, workspace, mode }: { publication: Public
     setBusy(true);
     setError('');
     try {
-      const result = await post<Publication>(`/api/records/${id}/revisions`, { conclusion: revisedConclusion });
+      const result = await post<Publication>(`/api/records/${id}/revisions`, { conclusion: revisedConclusion, runId: evidenceRun.id });
       window.location.assign(result.url);
     } catch (reason) {
       setError(errorMessage(reason));
@@ -224,21 +228,21 @@ function Record({ publication: initial, workspace, mode }: { publication: Public
             <p className="record-conclusion"><strong>Вывод стажёра</strong>{conclusion || 'Вывод не добавлен.'}</p>
             {previous && <section className="revision-context" aria-label="Предыдущая версия">
               <a href={`/records/${previous.id}`} className="text-link">Предыдущая версия <ArrowUpRight size={15} /></a>
-              <p>{previous.runId === run.id ? 'Исправлен вывод. Использован исходный прогон.' : 'Выполнен новый прогон.'}</p>
+              <p>{previous.runId === run.id ? 'Исправлен вывод. Использован исходный прогон.' : 'Исправление опирается на другой сохранённый прогон.'}</p>
               {previous.conclusion && <p className="record-conclusion"><strong>Предыдущий вывод</strong>{previous.conclusion}</p>}
               {previous.review?.comment && <p className="record-conclusion"><strong>Замечание наставника</strong>{previous.review.comment}</p>}
             </section>}
             {nextId && <a href={`/records/${nextId}`} className="text-link">Открыть исправленную версию <ArrowUpRight size={15} /></a>}
           </section>
           <section className="record-summary" aria-label="Повтор проверки">
-            {workspace.identity && <details className="response-details stand-switch">
+            {mentor ? <details className="response-details stand-switch">
               <summary>Демо-стенд · {fixed ? 'исправный ответ' : 'ответ с дефектом'}</summary>
               <p>Настройка действует на обе задачи в этом локальном запуске.</p>
               <button type="button" className="button secondary" disabled={switchingStand || replaying} onClick={() => void changeStand()}>
                 {fixed ? 'Вернуть дефект на стенд' : 'Включить исправный ответ'}
               </button>
-            </details>}
-            <button type="button" className="button secondary" disabled={replaying || switchingStand} onClick={() => void repeat()}>
+            </details> : workspace.identity && <p className="fact">Демо-стенд сейчас · {fixed ? 'исправный ответ' : 'ответ с дефектом'}</p>}
+            <button type="button" className="button secondary" disabled={replaying || switchingStand || busy || editing} onClick={() => void repeat()}>
               {replaying ? 'Повторяем запрос…' : 'Повторить проверку'}
             </button>
             {replayError && <p role="alert" className="action-error">{replayError}</p>}
@@ -250,15 +254,28 @@ function Record({ publication: initial, workspace, mode }: { publication: Public
               <div id="record-replay" className="replay-summary">
               {[{ title: 'Исходный прогон', run }, { title: 'Последний повтор', run: replay }].map(({ title, run }) => (
                 <div key={run.id}><h3>{title}</h3><time dateTime={run.checkedAt}>{formatTime(run.checkedAt)}</time>
-                  {summarizeRun(run).map((fact, index) => <p className="fact" key={fact}
-                    id={run.id === replay.id ? `record-replay-${run.checks[index].id}` : undefined}>{fact}</p>)}
+                  <p className="fact">{standLabel(run)} · <code>{run.id.slice(0, 8)}</code></p>
+                  {summarizeRun(run).map((fact) => <p className="fact" key={fact}>{fact}</p>)}
+                  <p className="fact"><strong>Совпадение с ожиданием</strong> · {run.checks.every(({ matches }) => matches) ? 'да' : 'есть расхождение'}</p>
+                  <p className="fact"><strong>Соответствие правилу</strong> · {run.checks.every(responseFollowsRule) ? 'да' : 'есть расхождение'}</p>
                 </div>
               ))}
               </div>
-              {!mentor && mode !== 'manual' && !checkingReplay && <button type="button" className="button secondary"
+              <details className="response-details">
+                <summary>Открыть ответ повтора</summary>
+                <Evidence run={replay} anchorPrefix="record-replay" />
+              </details>
+              {!mentor && mode !== 'manual' && !checkingReplay && !editing && <button type="button" className="button secondary"
                 onClick={() => setCheckingReplay(true)}>Сверить старый вывод с повтором</button>}
               {checkingReplay && <Conclusion key={replay.id} run={replay} value={replayConclusion} onChange={setReplayConclusion}
-                label="Вывод для проверки по повтору" mode={mode} openRule={(n) => showInstruction(instruction.current, n)} evidenceAnchor="record-replay" />}
+                label="Вывод для проверки по повтору" context="последний повтор" mode={mode} openRule={(n) => showInstruction(instruction.current, n)} evidenceAnchor="record-replay" />}
+              {checkingReplay && canRevise && !editing && <button type="button" className="button secondary" onClick={() => {
+                setRevisedConclusion(replayConclusion);
+                setUseReplay(true);
+                setEditing(true);
+                setCheckingReplay(false);
+                document.getElementById('review-title')?.focus();
+              }}>Исправить запись по повтору</button>}
             </>}
           </section>
           <RunContext run={run} showRules />
@@ -267,7 +284,7 @@ function Record({ publication: initial, workspace, mode }: { publication: Public
         </section>
         <div className="record-sidebar">
           <section className="surface review-panel" aria-labelledby="review-title">
-            <h2 id="review-title">Решение наставника</h2>
+            <h2 id="review-title" tabIndex={-1}>Решение наставника</h2>
             {review ? <div role="status">
               <p><strong>{reviewLabel[review.decision]}</strong> · <time dateTime={review.reviewedAt}>{formatTime(review.reviewedAt)}</time></p>
               {review.comment && <p className="record-conclusion">{review.comment}</p>}
@@ -281,14 +298,24 @@ function Record({ publication: initial, workspace, mode }: { publication: Public
               {busy && <p role="status">Сохраняем решение…</p>}
               {error && <p className="action-error" role="alert">{error}</p>}
             </> : <p role="status">Ожидает решения. Наставник увидит опубликованную запись в своём списке.</p>}
-            {!mentor && review?.decision === 'returned' && !nextId && <>
-              {!editing ? <button type="button" className="button primary" onClick={() => setEditing(true)}>Исправить вывод</button> : <>
-                <Conclusion run={run} value={revisedConclusion} onChange={setRevisedConclusion} mode={mode}
+            {canRevise && <>
+              {!editing ? <button type="button" className="button primary" onClick={() => {
+                setEditing(true);
+                setCheckingReplay(false);
+              }}>Исправить вывод</button> : <>
+                {replay && <label>Прогон для исправления <select value={useReplay ? 'replay' : 'original'} disabled={busy}
+                  onChange={(event) => setUseReplay(event.target.value === 'replay')}>
+                  <option value="original">Исходный прогон</option>
+                  <option value="replay">Последний повтор</option>
+                </select></label>}
+                <Conclusion key={evidenceRun.id} run={evidenceRun} value={revisedConclusion} onChange={setRevisedConclusion} mode={mode}
+                  context={useReplay ? 'последний повтор' : 'исходный прогон'} evidenceAnchor={useReplay ? 'record-replay' : 'result-evidence'}
                   label="Исправленный вывод" openRule={(n) => showInstruction(instruction.current, n)} />
                 <button type="button" className="button primary"
-                  disabled={busy || !revisedConclusion.trim() || revisedConclusion.trim() === conclusion}
+                  disabled={busy || !revisedConclusion.trim() || (!useReplay && revisedConclusion.trim() === conclusion)}
                   onClick={() => void submitRevision()}>{busy ? 'Отправляем…' : 'Отправить исправление'}</button>
                 {error && <p className="action-error" role="alert">{error}</p>}
+                <button type="button" className="text-link" disabled={busy} onClick={() => { setEditing(false); setUseReplay(false); }}>Закрыть исправление</button>
               </>}
               <a className="text-link" href={`/?task=${encodeURIComponent(run.task.id)}&revise=${encodeURIComponent(id)}`}>
                 Изменить ожидание и запустить заново <ArrowUpRight size={15} />

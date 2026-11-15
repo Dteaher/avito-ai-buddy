@@ -71,6 +71,7 @@ export interface PriceListing {
 }
 
 interface ResponseSnapshot {
+  standMode?: 'defect' | 'fixed';
   status: number;
   rawBody: string;
   matches: boolean;
@@ -173,6 +174,6 @@ export interface BuddyAnswer {
 }
 
 export interface ClaimVerdict {
-  status: 'confirmed' | 'refuted' | 'unclear';
+  status: 'confirmed' | 'refuted' | 'observation' | 'unclear';
   text: string;
 }

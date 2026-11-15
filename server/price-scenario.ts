@@ -49,14 +49,14 @@ function sameOrder(first: string[], second: string[]) {
 }
 
 export async function executePriceRun(origin: string, expectedOrder: string[]): Promise<PriceRun> {
-  const { items, rawBody, status } = await fetchStand(origin, priceCheck.path, AbortSignal.timeout(5000));
+  const { items, rawBody, status, standMode } = await fetchStand(origin, priceCheck.path, AbortSignal.timeout(5000));
   if (!items.every(isPriceListing)) throw new Error('Invalid price listings');
   const actualOrder = items.map(({ id }) => id);
   const sameItems = actualOrder.length === expectedOrder.length && expectedOrder.every((id) => actualOrder.includes(id));
   return {
     kind: 'price-order', id: randomUUID(), task: sortTask, checkedAt: new Date().toISOString(),
     checks: [{
-      ...priceCheck, status, rawBody, items, fixtures: priceItems, expectedOrder, actualOrder, ruleOrder, sameItems,
+      ...priceCheck, status, standMode, rawBody, items, fixtures: priceItems, expectedOrder, actualOrder, ruleOrder, sameItems,
       matches: sameOrder(expectedOrder, actualOrder), followsRule: sameOrder(expectedOrder, ruleOrder),
     }],
   };

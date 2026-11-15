@@ -1,6 +1,7 @@
 import { Check, ChevronDown, CircleAlert, Clock3, Terminal, X } from 'lucide-react';
 import { cities, type CheckResult, type PriceResult, type Run, type RunEvidenceSource } from '../shared/contracts';
 import { PriceComparison, priceLabel } from './PriceOrder';
+import { responseFollowsRule } from '../shared/run-summary';
 
 type ResponseCheck = CheckResult | PriceResult;
 
@@ -71,11 +72,19 @@ function ResponseDetails({ check }: { check: ResponseCheck }) {
   );
 }
 
+function RuleDifference({ check }: { check: ResponseCheck }) {
+  const follows = responseFollowsRule(check);
+  return check.matches === follows ? null : (
+    <p className="fact"><strong>Ответ по правилу</strong> · {follows ? 'соответствует инструкции' : 'расходится с инструкцией'}.</p>
+  );
+}
+
 function CityEvidence({ check, label = check.label, anchor }: { check: CheckResult; label?: string; anchor?: string }) {
   return (
     <section id={anchor} aria-label={label}>
       <div className="request-heading"><RequestLine check={check} /><span className="http-status">HTTP {check.status}</span></div>
       <Comparison check={check} />
+      <RuleDifference check={check} />
       <ResponseDetails check={check} />
     </section>
   );
@@ -91,6 +100,7 @@ export function Evidence({ run, animate = false, checkId, anchorPrefix }: {
       <section id={anchor(check.id)} className={`evidence${animate ? ' reveal' : ''}`} aria-label="Основной запрос">
         <div className="request-heading"><RequestLine check={check} /><span className="http-status">HTTP {check.status}</span></div>
         <PriceComparison check={check} animate={animate} />
+        <RuleDifference check={check} />
         <ResponseDetails check={check} />
       </section>
     );
@@ -111,6 +121,7 @@ export function Evidence({ run, animate = false, checkId, anchorPrefix }: {
         <div className="control-body">
           <div className="request-heading"><RequestLine check={control} /><span className="http-status">HTTP {control.status}</span></div>
           <Comparison check={control} />
+          <RuleDifference check={control} />
           <ResponseBody check={control} />
         </div>
       </details>

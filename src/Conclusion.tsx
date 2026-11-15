@@ -3,12 +3,14 @@ import { ArrowUpRight, LoaderCircle } from 'lucide-react';
 import type { BuddyAnswer, BuddyQuestion, Run } from '../shared/contracts';
 import { errorMessage, post } from './api';
 import { Escalation } from './Escalation';
+import { formatTime } from './Evidence';
 
-export function Conclusion({ run, value, onChange, openRule, mode, evidenceAnchor = 'result-evidence', label = 'Твой вывод' }: {
+export function Conclusion({ run, value, onChange, openRule, mode, evidenceAnchor = 'result-evidence', label = 'Твой вывод', context }: {
   run: Run; value: string; onChange: (value: string) => void;
   mode?: BuddyQuestion['mode']; openRule: (rule: number) => void;
   evidenceAnchor?: string;
   label?: string;
+  context?: string;
 }) {
   const field = useId();
   const [feedback, setFeedback] = useState<{ question: string; mode?: BuddyQuestion['mode']; answer: BuddyAnswer }>();
@@ -38,6 +40,7 @@ export function Conclusion({ run, value, onChange, openRule, mode, evidenceAncho
   return (
     <section className="conclusion" aria-labelledby={`${field}-title`}>
       <h3 id={`${field}-title`}><label htmlFor={field}>{label}</label></h3>
+      {context && <p className="fact">Сверка · {context} · <time dateTime={run.checkedAt}>{formatTime(run.checkedAt)}</time> · <code>{run.id.slice(0, 8)}</code></p>}
       <textarea id={field} value={value} maxLength={1000} rows={2}
         placeholder="Что подтвердилось и где есть расхождение?"
         onChange={(event) => { onChange(event.target.value); setError(''); }} />
@@ -54,16 +57,20 @@ export function Conclusion({ run, value, onChange, openRule, mode, evidenceAncho
         {answer.mode === 'guide-fallback' && <p className="fallback-note">Ответ из демо-справки. Модель не вернула проверенный ответ.</p>}
         {answer.verdicts?.length ? <>
           <ul className="claim-verdicts">{answer.verdicts.map(({ status, text }, index) => (
-            <li key={index} data-status={status}><strong>{{ confirmed: 'Подтверждено', refuted: 'Опровергнуто', unclear: 'Уточнить' }[status]}</strong><p>{text}</p></li>
+            <li key={index} data-status={status}><strong>{{ confirmed: 'Подтверждено', refuted: 'Опровергнуто', observation: 'Наблюдение', unclear: 'Уточнить' }[status]}</strong><p>{text}</p></li>
           ))}</ul>
           {answer.note && <p>{answer.note}</p>}
         </> : <p>{answer.text}</p>}
         {answer.facts?.map((fact) => <p key={fact} className="fact">{fact}</p>)}
         <div className="source-links">
-          {answer.sources.map((source) => 'runId' in source
+          {answer.sources.filter((source) => !('runId' in source) || source.runId === run.id).map((source) => 'runId' in source
             ? <a key={source.checkId} className="text-link" href={`#${evidenceAnchor}-${source.checkId}`} onClick={() => {
               const target = document.getElementById(`${evidenceAnchor}-${source.checkId}`);
-              if (target instanceof HTMLDetailsElement) target.open = true;
+              let disclosure = target?.closest('details');
+              while (disclosure) {
+                disclosure.open = true;
+                disclosure = disclosure.parentElement?.closest('details') ?? null;
+              }
             }}>Ответ стенда · {source.label} <ArrowUpRight size={15} /></a>
             : <button key={source.ruleNumber} type="button" className="source-link" onClick={() => openRule(source.ruleNumber)}>
               Тестовая инструкция · пункт {source.ruleNumber} <ArrowUpRight size={15} />

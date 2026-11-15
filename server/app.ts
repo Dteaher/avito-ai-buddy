@@ -49,6 +49,8 @@ export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) 
 
   app.get('/demo/search', (req, res) => {
     const filters = Object.keys(req.query);
+    res.set('X-Avito-Demo-Stand', standFixed ? 'fixed' : 'defect');
+    res.set('Cache-Control', 'no-store');
     if (filters.length === 1 && req.query.sort === 'price_asc') {
       // Намеренный дефект: null идёт первым, хотя состав выдачи полный.
       const nullPrice = standFixed ? Infinity : -Infinity;
@@ -114,6 +116,10 @@ export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) 
   };
 
   app.post('/api/demo/stand', (req, res) => {
+    if (res.locals.identity.role !== 'mentor') {
+      res.status(403).json({ message: 'Режим демо-стенда меняет наставник.' });
+      return;
+    }
     if (typeof req.body?.fixed !== 'boolean') {
       res.status(400).json({ message: 'Выбери состояние тестового стенда.' });
       return;

@@ -12,6 +12,7 @@ export const cityClaims = {
   'main-correct': 'состав без фильтра правильный',
   'control-correct': 'состав с фильтром Казань правильный',
   'main-missing-samara': 'Самара отсутствует без фильтра',
+  'control-missing-samara': 'Самара отсутствует в контрольном запросе',
   'control-missing-samara-is-defect': 'отсутствие Самары в фильтре Казань является дефектом',
 };
 
@@ -45,7 +46,7 @@ function cityFacts(check: CheckResult): Record<string, readonly [boolean, string
   const fact = `${prefix} стенд вернул: ${cityList}. ${samara ? 'Самара присутствует.' : 'Самара отсутствует.'} ${main ? 'По пункту 1 нужны Казань и Самара.' : 'По пункту 2 нужна только Казань.'}`;
   return main
     ? { 'main-correct': [same, fact], 'main-missing-samara': [!samara, fact] } as const
-    : { 'control-correct': [same, fact], 'control-missing-samara-is-defect': [required && !samara, fact] } as const;
+    : { 'control-correct': [same, fact], 'control-missing-samara': [!samara, fact], 'control-missing-samara-is-defect': [required && !samara, fact] } as const;
 }
 
 function inferPrice(query: string) {
@@ -79,8 +80,11 @@ function inferCities(query: string, scope: ReturnType<typeof searchScope>) {
   const claims: string[] = [];
   const missing = /(?:нет|отсутств|не приш|не хватает|пропал).{0,30}самар|самар.{0,30}(?:нет|отсутств|не приш|пропал)/.test(query);
   if (missing && scope !== 'control') claims.push(/не (?:отсутствует|пропала)/.test(query) ? 'not-main-missing-samara' : 'main-missing-samara');
-  if (missing && scope === 'control') claims.push(/дефект|ошиб/.test(query) && !/не (?:дефект|ошиб)/.test(query)
-    ? 'control-missing-samara-is-defect' : 'control-correct');
+  if (missing && scope === 'control') {
+    if (/дефект|ошиб/.test(query) && !/не (?:дефект|ошиб)/.test(query)) claims.push('control-missing-samara-is-defect');
+    else if (/(?:контрол|результат|состав).{0,35}(?:коррект|верн|правиль)|только казан/.test(query)) claims.push('control-correct');
+    else claims.push(/не (?:отсутствует|пропала)/.test(query) ? 'not-control-missing-samara' : 'control-missing-samara');
+  }
   const success = /правильн|корректн|работа[ею]т|штатн|соответству|верн|нормальн|только казан|казан.{0,15}и самар/.test(query);
   if (missing && scope !== 'control' && /(?:состав|выдач).{0,25}не\s*(?:правильн|верн|корректн)/.test(query)) {
     claims.push('not-main-correct');
@@ -96,17 +100,37 @@ function inferCities(query: string, scope: ReturnType<typeof searchScope>) {
 
 const unclear = 'Уточни, что именно утверждаешь об ответе стенда: состав выдачи или порядок элементов.';
 
+function reviewClauses(query: string) {
+  // Quoted punctuation cannot terminate the surrounding reported statement.
+  const quoted = query.replace(/«[^»]+»|“[^”]+”|"[^"]+"/g, (text) => `цитата ${text.replace(/[.!?;,:]/g, ' ')}`);
+  return quoted.split(/(?<=[.!?;])\s+|\n+/).flatMap((sentence) => {
+    const question = sentence.trimEnd().endsWith('?');
+    const parts = /^\s*если\s/.test(sentence) ? [sentence] : sentence.split(/,\s*(?:но|а|зато|однако)\s+/);
+    return parts.map((text) => {
+      const clause = text.trim();
+      const qualified = question
+        || /(?:^|[^\p{L}])(?:цитата|если|возможно|наверное|похоже|может\s+быть|вряд\s+ли|кажется|предполагаю|сомневаюсь|есть\s+ли)(?=$|[^\p{L}])/u.test(clause)
+        || /не\s+(?:\S+\s+){0,2}(?:уверен|знаю|утверждаю|говорю|скажу|сказать|утверждать|подтверд|доказано)/.test(clause)
+        || /(?:коллег|наставник|автор|в тикете|в отчете).{0,45}(?:написал|сказал|считает|утвержда|указал|говорит)|(?:написал|сказал|утвержда).{0,25}(?:коллег|наставник|автор)/.test(clause);
+      return { clause, qualified };
+    }).filter(({ clause }) => clause.length > 0);
+  });
+}
+
 export function reviewClaims(run: Run, query: string, extracted?: string[]) {
   const scope = searchScope(query);
   const price = run.kind === 'price-order';
   const checks = price ? run.checks : run.checks.filter(({ id }) => scope === 'control' ? id === 'kazan'
     : scope === 'main' ? id === 'without-city' : true);
-  const explicit = price ? inferPrice(query) : inferCities(query, scope);
-  // Prefer statements that can be tied directly to the trainee's wording over inferred additions.
-  const claims = new Set(explicit.length ? explicit : extracted);
-  if (/^(?:я )?(?:не утверждаю|не говорю|не уверен)|^(?:может|похоже|а если|возможно).+\?$/.test(query)) claims.clear();
+  const clauses = reviewClauses(query);
+  const scoped = clauses.map(({ clause, qualified }) => ({
+    qualified, scope: searchScope(clause),
+    claims: price ? inferPrice(clause) : inferCities(clause, searchScope(clause) ?? scope),
+  }));
+  const claims = new Set(scoped.filter(({ qualified }) => !qualified).flatMap(({ claims }) => claims));
   const verdicts: ClaimVerdict[] = [];
   const sources = new Set<Run['checks'][number]['id']>();
+  const observations = new Set<string>();
   for (const check of checks) {
     const tests: Record<string, readonly [boolean | undefined, string]> = 'ruleOrder' in check ? priceFacts(check) : cityFacts(check);
     for (const claim of claims) {
@@ -120,9 +144,23 @@ export function reviewClaims(run: Run, query: string, extracted?: string[]) {
       verdicts.push({ status, text: `«${label}». ${fact}` });
       sources.add(check.id);
     }
+    const neutral = scoped.filter(({ qualified, scope }) => qualified && (scope !== 'main' || check.id === 'without-city')
+      && (scope !== 'control' || check.id === 'kazan'));
+    const keys = neutral.flatMap(({ claims }) => claims);
+    // A model-only interpretation may point to evidence. It cannot attribute a claim to the trainee.
+    if (!claims.size && !neutral.length) keys.push(...(extracted ?? []));
+    const fallbackKey = price ? 'null-missing' : check.id === 'kazan' ? 'control-missing-samara' : 'main-missing-samara';
+    if (!keys.length && neutral.length) keys.push(fallbackKey);
+    for (const claim of keys) {
+      const key = claim.replace(/^not-/, '');
+      if (!Object.hasOwn(tests, key)) continue;
+      observations.add(tests[key][1]);
+      sources.add(check.id);
+    }
   }
+  if (observations.size) verdicts.push({ status: 'observation', text: [...observations].join(' ') });
   if (!verdicts.length) verdicts.push({ status: 'unclear', text: unclear });
-  const hypothesis = /(?:к[еэ]ш|пагинац|гипотез|причин|наверно.*база)/.test(query)
+  const hypothesis = /(?:к[еэ]ш|пагинац|гипотез|причин|отсе[яи]|из-за|наверно.*база)/.test(query)
     ? 'Причина остаётся гипотезой. Этот прогон устанавливает содержимое ответа.' : '';
   return { verdicts, ids: sources.size ? sources : new Set(checks.map(({ id }) => id)), hypothesis };
 }

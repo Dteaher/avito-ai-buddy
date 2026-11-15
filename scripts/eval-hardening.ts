@@ -8,7 +8,7 @@ type Sample = {
   id: string;
   question: string;
   task: 'SORT-01' | 'SEARCH-01';
-  run?: 'fixed' | 'broken' | 'foreign';
+  run?: 'fixed' | 'broken' | 'foreign' | 'replayed';
   kind?: BuddyAnswer['kind'];
   check?: 'price-asc' | 'without-city' | 'kazan';
   statuses?: ClaimVerdict['status'][];
@@ -85,7 +85,32 @@ const audit: Sample[] = [
   { id: 'new-city-control', task: 'SEARCH-01', run: 'broken', question: 'Контрольный запрос вернул ровно то, что должен был, только Казань.', statuses: ['confirmed'], check: 'kazan' },
   { id: 'new-uncertain-cause', task: 'SEARCH-01', run: 'broken', question: 'Не уверен, связано ли это с пагинацией.', statuses: ['unclear'], text: /гипотез/i },
 ];
-const corpus = process.argv.includes('--pilot') ? pilot : process.argv.includes('--audit') ? audit : heldOut;
+const evidence: Sample[] = [
+  { id: 'nonstandard-plan', task: 'SORT-01', question: 'Строку с незаполненным денежным значением выброшу, так проще сравнить последовательность.', kind: 'draft', check: 'price-asc', text: /конце|после|последн/i },
+  { id: 'pinned-broken', task: 'SORT-01', run: 'broken', question: 'Без цены товар на первом месте.', statuses: ['confirmed'], check: 'price-asc' },
+  { id: 'pinned-replay', task: 'SORT-01', run: 'replayed', question: 'Без цены товар на первом месте.', statuses: ['refuted'], check: 'price-asc' },
+  { id: 'price-hearsay', task: 'SORT-01', run: 'replayed', question: 'Наставник сказал, что позицию без цены потеряли. Хочу сам проверить ответ.', statuses: ['observation'], check: 'price-asc' },
+  { id: 'price-question', task: 'SORT-01', run: 'replayed', question: 'Объявление с пустой ценой вообще есть в списке?', statuses: ['observation'], check: 'price-asc' },
+  { id: 'price-negated', task: 'SORT-01', run: 'replayed', question: 'Товар без ценника из выдачи не исчез.', statuses: ['confirmed'] },
+  { id: 'cause', task: 'SORT-01', run: 'broken', question: 'Если карточки без цены нет, мог ли её отсеять фильтр?', statuses: ['observation'], text: /гипотез/i },
+  { id: 'price-mixed', task: 'SORT-01', run: 'broken', question: 'Цены растут, так что сортировка корректная.', statuses: ['confirmed', 'refuted'] },
+  { id: 'price-mixed-scope', task: 'SORT-01', run: 'replayed', question: 'Сомневаюсь, что товар без цены потеряли, однако числовые цены идут по порядку.', statuses: ['confirmed', 'observation'] },
+  { id: 'city-doubt', task: 'SEARCH-01', run: 'fixed', question: 'Я не берусь утверждать, что без города не хватает Самары.', statuses: ['observation'], check: 'without-city' },
+  { id: 'city-mixed-scope', task: 'SEARCH-01', run: 'broken', question: 'Возможно, без города Самара пропала, но в контроле только Казань.', statuses: ['confirmed', 'observation'] },
+  { id: 'city-quote', task: 'SEARCH-01', run: 'fixed', question: 'В тикете указали «без фильтра Самара отсутствует». Что видно по ответу?', statuses: ['observation'] },
+  { id: 'city-negated', task: 'SEARCH-01', run: 'fixed', question: 'В нефильтрованной выдаче Самара не пропала.', statuses: ['confirmed'], check: 'without-city' },
+  { id: 'foreign-snapshot', task: 'SEARCH-01', run: 'foreign', question: 'Скажи по чужому прогону, вернулся ли нужный город.' },
+];
+const freshEvidence: Sample[] = [
+  { id: 'unfamiliar-plan', task: 'SORT-01', question: 'Пустой денежный атрибут предлагаю выкинуть до сопоставления позиций.', kind: 'draft', check: 'price-asc', text: /последн|в конце/i },
+  { id: 'first-before', task: 'SORT-01', run: 'broken', question: 'В начале списка вижу объявление без стоимости.', statuses: ['confirmed'], check: 'price-asc' },
+  { id: 'first-after', task: 'SORT-01', run: 'replayed', question: 'В начале списка вижу объявление без стоимости.', statuses: ['refuted'], check: 'price-asc' },
+  { id: 'price-qualified-then-asserted', task: 'SORT-01', run: 'replayed', question: 'Возможно, строку без цены потеряли. Числовые значения цены возрастают.', statuses: ['confirmed', 'observation'] },
+  { id: 'city-reported-and-own', task: 'SEARCH-01', run: 'fixed', question: '«Самары нет», — говорила коллега. По-моему, основной запрос работает правильно?', statuses: ['observation'] },
+  { id: 'causal-city-question', task: 'SEARCH-01', run: 'broken', question: 'Без фильтра не хватает Самары. Может быть, это пагинация?', statuses: ['confirmed', 'observation'], text: /гипотез/i },
+];
+const corpus = process.argv.includes('--evidence-fresh') ? freshEvidence : process.argv.includes('--evidence') ? evidence
+  : process.argv.includes('--pilot') ? pilot : process.argv.includes('--audit') ? audit : heldOut;
 
 let attempts = 0;
 const buddy = createBuddy(process.env, () => attempts++);
@@ -105,15 +130,26 @@ try {
     method: 'POST', headers: { cookie: session, 'content-type': 'application/json' }, body: JSON.stringify(body),
   });
   const runs = new Map<string, string>();
+  const mentorLogin = await post('/api/session', { identity: 'demo-mentor' }, '');
+  const mentor = mentorLogin.headers.get('set-cookie')!.split(';')[0];
   const city = { checks: [{ id: 'without-city', expectedCities: ['kazan', 'samara'] }, { id: 'kazan', expectedCities: ['kazan'] }] };
   for (const fixed of [false, true]) {
-    await post('/api/demo/stand', { fixed });
+    if (!(await post('/api/demo/stand', { fixed }, mentor)).ok) throw new Error('Не удалось переключить демо-стенд');
     for (const task of ['SORT-01', 'SEARCH-01']) {
       const body = task === 'SEARCH-01' ? city : { checks: [{ id: 'price-asc', expectedOrder: ['ad-201', 'ad-202', 'ad-203'] }] };
       const response = await post(`/api/tasks/${task}/runs`, body);
       if (response.status !== 201) throw new Error(`Нет снимка для ${task}`);
       runs.set(`${task}/${fixed ? 'fixed' : 'broken'}`, (await response.json() as Run).id);
     }
+  }
+  if (corpus === evidence || corpus === freshEvidence) {
+    const original = runs.get('SORT-01/broken');
+    const publication = await post(`/api/tasks/SORT-01/runs/${original}/publication`, {});
+    if (publication.status !== 201) throw new Error('Нет записи для повтора');
+    const { id } = await publication.json() as { id: string };
+    const replay = await post(`/api/records/${id}/replay`, {}, mentor);
+    if (replay.status !== 201) throw new Error('Не удалось повторить запрос');
+    runs.set('SORT-01/replayed', (await replay.json() as Run).id);
   }
   const login = await post('/api/session', { identity: 'demo-trainee-b' }, '');
   const other = login.headers.get('set-cookie')!.split(';')[0];
@@ -143,11 +179,13 @@ try {
       const expectedKind = sample.kind ?? 'feedback';
       const canon = (statuses: string[]) => [...statuses].sort().join(',');
       const sources = answer.sources?.filter((source) => 'checkId' in source).map((source) => source.checkId);
+      const correctRun = !sample.statuses || Boolean(sources?.length) && answer.sources.every((source) =>
+        !('runId' in source) || source.runId === req.runId);
       const correctCheck = sample.statuses ? sources?.length === 1 && sources[0] === sample.check
         : answer.draft?.checkId === sample.check && answer.sources?.some((source) => 'ruleNumber' in source
           && source.ruleNumber === (sample.check === 'without-city' ? 1 : 2));
       const ok = sample.run === 'foreign' ? response.status === 404 && attempts === before
-        : clarification && response.ok && answer.kind === expectedKind && (!sample.check || correctCheck)
+        : clarification && response.ok && answer.kind === expectedKind && correctRun && (!sample.check || correctCheck)
           && (!sample.statuses || canon(answer.verdicts?.map(({ status }) => status) ?? []) === canon([...sample.statuses]))
           && (!sample.text || sample.text.test(answer.text));
       const elapsed = Math.round(performance.now() - started);

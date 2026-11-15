@@ -24,7 +24,7 @@ export function workflowContract(task: Task, intent: WorkflowReply['intent'], gu
   if (intent === 'review') return {
     intent, checks: [], claims: Object.keys(claims).flatMap((key) => [key, 'not-' + key]),
     hint: [
-      'Извлеки отдельные тезисы стажёра. Сохрани отрицание префиксом not-. Не заменяй тезис фактом из стенда. Если смысл, объект или намерение неясны, верни claims=[]. Причины, предположения и вопросы не являются утверждениями о содержимом ответа.',
+      'Извлеки только тезисы, которые стажёр сообщает как факт. Сохрани отрицание префиксом not-. Сомнение, вопрос, условие, причина и пересказ чужого мнения не являются тезисами стажёра. Если смысл неясен, верни claims=[].',
       'Верни kind=feedback, text="Вывод разобран" и claims, в котором только ID утверждений, явно сделанных стажёром. Если оба запроса работают, отметь main-correct и control-correct. Если стажёр упоминает контрольный запрос, не приписывай ему вывод о запросе без фильтра.',
       'Пример: «числа возрастают, значит порядок верный» даёт numeric-ascending и sort-correct. Для тезиса «карточка без цены пропала» верни null-missing, даже если тезис ложный. «карточка без цены не пропала» даёт not-null-missing. Аналогично «Самары нет» даёт main-missing-samara. Для темы вне задачи верни insufficient, sources=[] и claims=[].',
       `Утверждения: ${JSON.stringify(claims)}`,
@@ -100,7 +100,7 @@ export function guideFeedback(run: Run, query: string, claims?: string[]): Buddy
     { runId: run.id, checkId: id, label },
     { instructionId: run.task.instruction.id, ruleNumber: id === 'without-city' ? 1 : 2 },
   ]);
-  const labels = { confirmed: 'Подтверждено', refuted: 'Опровергнуто', unclear: 'Нужно уточнение' };
+  const labels = { confirmed: 'Подтверждено', refuted: 'Опровергнуто', observation: 'Наблюдение', unclear: 'Нужно уточнение' };
   const text = [...verdicts.map(({ status, text }) => `${labels[status]} · ${text}`), hypothesis].filter(Boolean).join(' ');
   return { kind: 'feedback', mode: 'guide', text, verdicts, note: hypothesis || undefined, sources,
     facts: summarizeRun(run).filter((_, index) => ids.has(run.checks[index].id)) };

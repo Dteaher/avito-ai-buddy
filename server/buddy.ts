@@ -160,21 +160,29 @@ export function createBuddy(env: NodeJS.ProcessEnv, observeModelAttempt?: () => 
           const workflow = intent ? workflowContract(groundingTask, intent, answer) : undefined;
           const timeout = workflow ? AbortSignal.timeout(provider.timeout) : undefined;
           const modelSignal = signal && timeout ? AbortSignal.any([signal, timeout]) : timeout ?? signal;
-          const generate = () => {
+          const generate = async () => {
             observeModelAttempt?.();
-            return generateReply(provider, {
+            const response = await generateReply(provider, {
               task: groundingTask, question, evidence: intent ? evidence : modelEvidence,
               history: intent === 'review' ? [] : history, followUp: followUp && !history.length ? hints[followUp] : undefined,
               signal: modelSignal, plan, workflow,
             });
+            if (intent === 'review' && response.kind === 'insufficient' && answer.verdicts?.some(({ status }) => status !== 'unclear')) {
+              throw new ModelResponseError();
+            }
+            return response;
           };
           const { checkId, reviewClaims, ...generated } = await generate().catch((error: unknown) => {
             if (workflow && error instanceof ModelResponseError && !modelSignal?.aborted) return generate();
             throw error;
           });
+          const text = checkId === 'price-asc'
+            ? (answer.kind === 'draft' && pricePlanNote(query) ? answer.text
+              : 'По пункту 2 карточку без цены оставляем в выдаче и ставим последней. Сравни позиции всех трёх карточек.')
+            : generated.text;
           answer = {
             ...(generated.kind === 'feedback' && run ? guideFeedback(run, query, reviewClaims) : generated),
-            ...(checkId === 'price-asc' && answer.kind === 'draft' && pricePlanNote(query) ? { text: answer.text } : {}),
+            ...(checkId ? { text } : {}),
             mode: 'model', ...(checkId ? { draft: draftFor(task, checkId) } : {}),
           };
         } catch (error) {
