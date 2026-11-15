@@ -1,0 +1,98 @@
+{
+  "sourceCommit": "36950e422015eb69f2cda5f6a16fdeb5d4ddd373",
+  "baseline": {
+    "chrome": "157.0.8103.51",
+    "desktop": [
+      1440,
+      900
+    ],
+    "mobile": [
+      390,
+      844
+    ],
+    "keyboard": true,
+    "reducedMotion": true,
+    "guide": true,
+    "correctSource": true,
+    "oldAnswerDiscarded": true,
+    "revisionUsesReplay": true,
+    "restart": true,
+    "foreignRecordDenied": true,
+    "manualBuddyCalls": 0,
+    "errors": []
+  },
+  "transfer": {
+    "archive": {
+      "url": "http://127.0.0.1:8313/records/QA-07457315-3465-428d-8171-e85592760de1",
+      "original": "0d2623e4-af6e-4f18-a887-281b2dd8a908",
+      "replay": "4a52568f-5b02-48a6-a243-4d14f5ce4ced",
+      "denied": "Не удалось открыть страницуЗадача недоступна в этой сессии.Повторить",
+      "checked": "desktop A/B/mentor + restart, source raw, review, copy pinned URL, 390 mobile keyboard reduced-motion manual"
+    },
+    "desktopSearch": "http://127.0.0.1:8313/records/QA-ef258164-5133-4026-88c2-9648e5f3941f",
+    "price": [
+      {
+        "url": "http://127.0.0.1:8314/records/QA-98be2909-a726-4bcd-8661-2884164e07b1",
+        "price": [
+          1200,
+          900,
+          null
+        ],
+        "buddyRun": "fa9db514-2633-450d-9f9f-bfc4034a961c",
+        "buddy": [
+          {
+            "status": "confirmed",
+            "text": "«неверно, что числовые цены возрастают». Числовые цены идут с нарушением возрастания."
+          }
+        ]
+      },
+      {
+        "url": "http://127.0.0.1:8314/records/QA-d1de9c20-96b1-4fca-bcdd-ba894feb5a8f",
+        "price": [
+          300,
+          500,
+          null
+        ],
+        "buddyRun": "d3c761ce-2bd6-4206-9476-8b989e44d259",
+        "buddy": [
+          {
+            "status": "confirmed",
+            "text": "«весь порядок соответствует инструкции». Порядок соответствует правилу. Карточка без цены присутствует на 3-м месте. Пункт 2 требует ставить такие карточки после карточек с ценой."
+          }
+        ]
+      }
+    ],
+    "chrome": "157.0.8103.51"
+  },
+  "legacy": {
+    "chrome": "157.0.8103.51",
+    "desktop": [
+      1440,
+      900
+    ],
+    "mobile": [
+      390,
+      844
+    ],
+    "keyboard": true,
+    "reducedMotion": true,
+    "guide": true,
+    "correctSource": true,
+    "oldAnswerDiscarded": true,
+    "revisionUsesReplay": true,
+    "restart": true,
+    "foreignRecordDenied": true,
+    "manualBuddyCalls": 0,
+    "mobileMentorAccepted": true,
+    "errors": []
+  },
+  "timeout": {
+    "chrome": "157.0.8103.51",
+    "waitingVisible": true,
+    "timeoutFallback": true,
+    "formRetained": true,
+    "taskSwitchClean": true,
+    "providerRequests": 2,
+    "providerAborts": 2
+  }
+}
