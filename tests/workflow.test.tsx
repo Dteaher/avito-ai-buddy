@@ -232,7 +232,14 @@ describe('First Check workspace', () => {
     expect(screen.getByText('QA-demo')).toBeTruthy();
     expect(screen.getByText('Самара отсутствует')).toBeTruthy();
     expect(screen.getByRole('link', { name: /К рабочему пространству/ }).getAttribute('href')).toBe('/');
-    await userEvent.setup().click(screen.getByRole('button', { name: 'Разобрать результат' }));
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Копировать доказательство' }));
+    const copied = await navigator.clipboard.readText();
+    expect(copied).toContain(`Снимок ${run.id}`);
+    expect(copied).toContain(`Правило ${run.task.instruction.id} v${run.task.instruction.version}`);
+    expect(copied).toContain(run.checks[0].path);
+    expect(copied).toContain(new URL(publication.url, window.location.origin).href);
+    await user.click(screen.getByRole('button', { name: 'Разобрать результат' }));
     await screen.findByText('Проверь содержимое ответа.');
     const discussion = mock.mock.calls.find(([url]) => url.endsWith('/SEARCH-01/buddy'));
     expect(JSON.parse(String(discussion?.[1]?.body))).toEqual({ question: 'Что вернул каждый из двух запросов в моём прогоне и где расхождение?', runId: run.id });

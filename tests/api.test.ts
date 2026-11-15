@@ -80,6 +80,91 @@ describe('SEARCH-01 over HTTP', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it('assigns a versioned catalog task and preserves the trainee decision and help order', async () => {
+    const archive = '/api/tasks/ARCHIVE-01';
+    const selection = '/api/workspace?task=ARCHIVE-01';
+    const mentor = await signIn('demo-mentor');
+    const other = await signIn('demo-trainee-b');
+    const input = { templateId: 'ARCHIVE-01', traineeId: 'demo-trainee' };
+    expect((await get(selection)).status).toBe(404);
+    expect((await post('/api/assignments', input)).status).toBe(403);
+    expect((await post('/api/assignments', { ...input, traineeId: 'demo-trainee-b' }, mentor)).status).toBe(400);
+    expect((await post('/api/assignments', input, mentor)).status).toBe(201);
+    expect((await post('/api/assignments', input, mentor)).status).toBe(200);
+    expect((await get(selection, other)).status).toBe(404);
+    expect((await get(`${archive}/instruction`, other)).status).toBe(404);
+    expect((await post(`${archive}/buddy`, { question: 'Архивные нужны?' }, other)).status).toBe(404);
+    expect((await post(`${archive}/runs`, {}, other)).status).toBe(404);
+    expect((await get('/demo/inventory', other)).status).toBe(404);
+
+    await stop();
+    await start();
+    const workspace = await (await get(selection)).json();
+    expect(workspace).toMatchObject({ task: { id: 'ARCHIVE-01', instruction: { version: '1.0' } }, attemptId: expect.any(String) });
+    const attempt = workspace.attemptId;
+    const first = { attemptId: attempt, checkId: 'active-only', checks: [
+      { id: 'all-statuses', expectedCities: ['active'] }, { id: 'active-only', expectedCities: ['active'] },
+    ] };
+    const final = { ...first, checkId: 'all-statuses', checks: [
+      { id: 'all-statuses', expectedCities: ['active', 'archived'] }, first.checks[1],
+    ] };
+    expect((await post(`${archive}/attempt`, first, other)).status).toBe(404);
+    expect((await post(`${archive}/attempt`, first)).status).toBe(200);
+    expect((await post(`${archive}/attempt`, final)).status).toBe(409);
+    const answer = await (await post(`${archive}/buddy`, {
+      question: 'Достаточно проверить активные товары?', intent: 'plan', attemptId: attempt, mode: 'guide',
+    })).json();
+    expect(answer).toMatchObject({ draft: { checkId: 'all-statuses' }, sources: [{ ruleNumber: 1 }] });
+    const response = await post(`${archive}/runs`, final);
+    expect(response.status).toBe(201);
+    const result = await response.json();
+    expect(result).toMatchObject({
+      attempt: { first: { checkId: 'active-only', expected: ['active'] }, final: { checkId: 'all-statuses', expected: ['active', 'archived'] }, help: 'after-choice' },
+      checks: [{ status: 200, matches: false, missing: ['archived'] }, { status: 200, matches: true }],
+    });
+    expect((await post(`${archive}/runs`, final)).status).toBe(409);
+    expect((await get(`${archive}/runs/${result.id}`, other)).status).toBe(404);
+    const record = await (await post(`${archive}/runs/${result.id}/publication`, { conclusion: 'Контроль прошёл, без фильтра пропали архивные товары.' })).json();
+    const view = `/api/records/${record.id}`;
+    expect((await get(view, other)).status).toBe(404);
+    expect((await post(`${view}/replay`, {}, other)).status).toBe(404);
+    expect((await post(`${archive}/buddy`, { question: 'Где архив?', runId: result.id }, other)).status).toBe(404);
+    expect((await get(view, mentor)).status).toBe(200);
+    expect((await post(`${view}/review`, { decision: 'accepted' }, mentor)).status).toBe(200);
+    const otherAttempt = (await (await get(selection)).json()).attemptId;
+    await post(`${archive}/buddy`, { question: 'Что должно вернуться без фильтра?', attemptId: otherAttempt, mode: 'guide' });
+    expect(await (await post(`${archive}/runs`, { ...final, attemptId: otherAttempt })).json()).toMatchObject({ attempt: { help: 'before-choice' } });
+    const noBuddy = (await (await get(selection)).json()).attemptId;
+    const independent = await (await post(`${archive}/runs`, { ...final, attemptId: noBuddy })).json();
+    expect(independent).toMatchObject({ attempt: { help: 'none', final: { checkId: 'all-statuses' } } });
+    expect(independent.attempt.first).toBeUndefined();
+
+    // Simulate a catalog update after publication, keeping the old stored run intact.
+    const database = new DatabaseSync(join(dir, 'test.sqlite'));
+    database.prepare('UPDATE assignments SET snapshot = ? WHERE task_id = ? AND trainee = ?')
+      .run(JSON.stringify({ ...workspace.task, instruction: { ...workspace.task.instruction, version: '2.0' } }), 'ARCHIVE-01', 'demo-trainee');
+    database.close();
+    expect(await (await get(selection)).json()).toMatchObject({ task: { instruction: { version: '2.0' } } });
+    await post('/api/demo/stand', { fixed: true }, mentor);
+    const replay = await post(`${view}/replay`, {}, mentor);
+    expect(replay.status).toBe(201);
+    expect(await replay.json()).toMatchObject({
+      task: { instruction: { version: '2.0' } }, checks: [{ status: 200, matches: true }, { status: 200, matches: true }],
+    });
+    expect(await (await get(view, mentor)).json()).toMatchObject({ run: result, replay: { task: { instruction: { version: '2.0' } } } });
+    const pinned = await post(`${archive}/buddy`, {
+      question: 'Без фильтра пропали архивные товары.', runId: result.id, intent: 'review', mode: 'guide',
+    });
+    expect(await pinned.json()).toMatchObject({
+      verdicts: [{ status: 'confirmed' }], sources: expect.arrayContaining([expect.objectContaining({ runId: result.id })]),
+    });
+    const quotation = await post(`${archive}/buddy`, {
+      question: 'В обращении написано «Без фильтра пропали архивные товары». Что в ответе?',
+      runId: result.id, intent: 'review', mode: 'guide',
+    });
+    expect(await quotation.json()).toMatchObject({ verdicts: [{ status: 'observation' }] });
+  });
+
   it('lets only a mentor configure the synthetic stand and persists the actual mode of each snapshot', async () => {
     const mentor = await signIn('demo-mentor');
     const traineeB = await signIn('demo-trainee-b');

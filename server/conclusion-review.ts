@@ -1,4 +1,4 @@
-import { cities, type CheckResult, type ClaimVerdict, type PriceResult, type Run } from '../shared/contracts.ts';
+import { groupLabels, type CheckResult, type ClaimVerdict, type PriceResult, type Run } from '../shared/contracts.ts';
 import { explainPriceRule, priceObservations } from '../shared/run-summary.ts';
 
 export const priceClaims = {
@@ -14,6 +14,12 @@ export const cityClaims = {
   'main-missing-samara': 'Самара отсутствует без фильтра',
   'control-missing-samara': 'Самара отсутствует в контрольном запросе',
   'control-missing-samara-is-defect': 'отсутствие Самары в фильтре Казань является дефектом',
+};
+export const archiveClaims = {
+  'main-correct': 'состав выдачи без фильтра соответствует правилу',
+  'control-correct': 'контроль по активным товарам соответствует правилу',
+  'main-missing-archive': 'без фильтра исчезли архивные товары',
+  'control-proves-main': 'успешный контроль доказывает корректность выдачи без фильтра',
 };
 
 function containsSame<T>(actual: T[], expected: T[]) {
@@ -43,11 +49,21 @@ function cityFacts(check: CheckResult): Record<string, readonly [boolean, string
   const required = check.ruleCities.includes('samara');
   const same = containsSame(check.actualCities, check.ruleCities);
   const prefix = main ? 'Без фильтра' : 'В контрольном запросе';
-  const cityList = check.actualCities.map((city) => cities[city]).join(', ') || 'пусто';
+  const cityList = check.actualCities.map((city) => groupLabels[city]).join(', ') || 'пусто';
   const fact = `${prefix} стенд вернул: ${cityList}. ${samara ? 'Самара присутствует.' : 'Самара отсутствует.'} ${main ? 'По пункту 1 нужны Казань и Самара.' : 'По пункту 2 нужна только Казань.'}`;
   return main
     ? { 'main-correct': [same, fact], 'main-missing-samara': [!samara, fact] } as const
     : { 'control-correct': [same, fact], 'control-missing-samara': [!samara, fact], 'control-missing-samara-is-defect': [required && !samara, fact] } as const;
+}
+
+function archiveFacts(check: CheckResult): Record<string, readonly [boolean, string]> {
+  const main = check.id === 'all-statuses';
+  const same = containsSame(check.actualCities, check.ruleCities);
+  const actual = check.actualCities.map((group) => groupLabels[group]).join(', ') || 'пусто';
+  const expected = check.ruleCities.map((group) => groupLabels[group]).join(', ');
+  const fact = `${check.label}: стенд вернул ${actual}. По правилу ожидаются ${expected}.`;
+  return main ? { 'main-correct': [same, fact], 'main-missing-archive': [!check.actualCities.includes('archived'), fact] }
+    : { 'control-correct': [same, fact], 'control-proves-main': [false, `${fact} Контроль проверяет фильтр. Чтобы проверить архивные товары, открой ответ запроса без фильтра.`] };
 }
 
 function inferPrice(query: string) {
@@ -71,10 +87,21 @@ function inferPrice(query: string) {
 
 function searchScope(query: string) {
   const main = /без (?:фильтр|город|параметр)|нефильтрован|основн|общ(?:ем|ий) запрос/.test(query);
-  const control = /контрол|фильтр (?:по казан|казан)|city\s*=\s*kazan/.test(query);
+  const control = /контрол|фильтр (?:по казан|казан|по активн)|city\s*=\s*kazan|status\s*=\s*active/.test(query);
   if ((main && control) || /(?:оба|обоих)\s+(?:запрос|ответ)/.test(query)) return 'both';
   if (control) return 'control';
   if (main) return 'main';
+}
+
+function inferArchive(query: string, scope: ReturnType<typeof searchScope>) {
+  const claims: string[] = [];
+  const missing = /архив.{0,35}(?:нет|отсутств|пропа|не приш)|(?:нет|отсутств|пропа|не приш).{0,35}архив/.test(query);
+  if (missing && scope !== 'control') claims.push(/не (?:пропал|отсутств)/.test(query) ? 'not-main-missing-archive' : 'main-missing-archive');
+  const matches = /соответству|правильн|корректн|прош[её]л|работает|только активн/.test(query);
+  if (matches && (scope === 'control' || scope === 'both')) claims.push('control-correct');
+  if (matches && !missing && scope !== 'control') claims.push('main-correct');
+  if (/контрол.{0,55}(?:доказыва|достаточ|значит).{0,45}(?:без фильтра|выдач|архив|все)/.test(query)) claims.push('control-proves-main');
+  return claims;
 }
 
 function inferCities(query: string, scope: ReturnType<typeof searchScope>) {
@@ -116,7 +143,7 @@ function reviewClauses(query: string) {
       const qualified = question
         || /(?:^|[^\p{L}])(?:цитата|если|возможно|наверное|похоже|может\s+быть|вряд\s+ли|кажется|предполагаю|сомневаюсь|есть\s+ли)(?=$|[^\p{L}])/u.test(clause)
         || /не\s+(?:\S+\s+){0,2}(?:уверен|знаю|думаю|считаю|утверждаю|говорю|скажу|сказать|утверждать|подтверд|доказано)/.test(clause)
-        || /(?:коллег|наставник|автор|в тикете|в отчете).{0,45}(?:написал|пишет|сказал|считает|утвержда|указал|говорит)|(?:написал|сказал|утвержда).{0,25}(?:коллег|наставник|автор)/.test(clause)
+        || /(?:коллег|наставник|автор|в тикете|в отчете|в обращении).{0,45}(?:написа[лн]|пишет|сказал|считает|утвержда|указа[лн]|говорит)|(?:написал|сказал|утвержда).{0,25}(?:коллег|наставник|автор)/.test(clause)
         || /(?:сказали|написали|сообщили),?\s+что|(?:^|\s)по словам\s/.test(clause);
       return { clause, qualified };
     }).filter(({ clause }) => clause.length > 0);
@@ -126,36 +153,40 @@ function reviewClauses(query: string) {
 export function reviewClaims(run: Run, query: string, extracted?: string[]) {
   const scope = searchScope(query);
   const price = run.kind === 'price-order';
-  const checks = price ? run.checks : run.checks.filter(({ id }) => scope === 'control' ? id === 'kazan'
-    : scope === 'main' ? id === 'without-city' : true);
+  const archive = Boolean(run.task.comparison);
+  const mainId = archive ? 'all-statuses' : 'without-city';
+  const controlId = archive ? 'active-only' : 'kazan';
+  const checks = price ? run.checks : run.checks.filter(({ id }) => scope === 'control' ? id === controlId
+    : scope === 'main' ? id === mainId : true);
   const clauses = reviewClauses(query);
   const scoped = clauses.map(({ clause, qualified }) => ({
     qualified, scope: searchScope(clause),
-    claims: price ? inferPrice(clause) : inferCities(clause, searchScope(clause) ?? scope),
+    claims: price ? inferPrice(clause) : (archive ? inferArchive : inferCities)(clause, searchScope(clause) ?? scope),
   }));
   const claims = new Set(scoped.filter(({ qualified }) => !qualified).flatMap(({ claims }) => claims));
   const verdicts: ClaimVerdict[] = [];
   const sources = new Set<Run['checks'][number]['id']>();
   const observations = new Set<string>();
   for (const check of checks) {
-    const tests: Record<string, readonly [boolean | undefined, string]> = 'ruleOrder' in check ? priceFacts(check) : cityFacts(check);
+    const tests: Record<string, readonly [boolean | undefined, string]> = 'ruleOrder' in check ? priceFacts(check) : (archive ? archiveFacts : cityFacts)(check);
     for (const claim of claims) {
       const negative = claim.startsWith('not-');
       const key = negative ? claim.slice(4) : claim;
       if (!Object.hasOwn(tests, key)) continue;
       const [confirmed, fact] = tests[key];
-      const labels: Record<string, string> = price ? priceClaims : cityClaims;
+      const labels: Record<string, string> = price ? priceClaims : archive ? archiveClaims : cityClaims;
       const status = confirmed === undefined ? 'unclear' : confirmed !== negative ? 'confirmed' : 'refuted';
       const label = negative ? `неверно, что ${labels[key]}` : labels[key];
       verdicts.push({ status, text: `«${label}». ${fact}` });
       sources.add(check.id);
     }
-    const neutral = scoped.filter(({ qualified, scope }) => qualified && (scope !== 'main' || check.id === 'without-city')
-      && (scope !== 'control' || check.id === 'kazan'));
+    const neutral = scoped.filter(({ qualified, scope }) => qualified && (scope !== 'main' || check.id === mainId)
+      && (scope !== 'control' || check.id === controlId));
     const keys = neutral.flatMap(({ claims }) => claims);
     // A model-only interpretation may point to evidence. It cannot attribute a claim to the trainee.
     if (!claims.size && !neutral.length) keys.push(...(extracted ?? []));
-    const fallbackKey = price ? 'null-missing' : check.id === 'kazan' ? 'control-missing-samara' : 'main-missing-samara';
+    const fallbackKey = price ? 'null-missing' : archive ? (check.id === controlId ? 'control-correct' : 'main-missing-archive')
+      : check.id === controlId ? 'control-missing-samara' : 'main-missing-samara';
     if (!keys.length && neutral.length) keys.push(fallbackKey);
     for (const claim of keys) {
       const key = claim.replace(/^not-/, '');

@@ -1,10 +1,10 @@
-import type { BuddyAnswer, CheckDraft, DraftCheck, Run, Task } from '../shared/contracts.ts';
+import { checkRuleNumber, type BuddyAnswer, type CheckDraft, type DraftCheck, type Run, type Task } from '../shared/contracts.ts';
 import { summarizeRun } from '../shared/run-summary.ts';
-import { checks, parseChecks, ruleCities } from './scenario.ts';
+import { parseChecks, setPlan } from './scenario.ts';
 import { parsePriceCheck, priceCheck, ruleOrder, sortTask } from './price-scenario.ts';
 import { guideIntent, type Reply } from './buddy-guide.ts';
 import type { WorkflowReply } from './buddy-model.ts';
-import { cityClaims, priceClaims, reviewClaims } from './conclusion-review.ts';
+import { archiveClaims, cityClaims, priceClaims, reviewClaims } from './conclusion-review.ts';
 
 export function draftFor(task: Task, id: DraftCheck['id']): CheckDraft | undefined {
   if (task.id === sortTask.id) {
@@ -12,46 +12,63 @@ export function draftFor(task: Task, id: DraftCheck['id']): CheckDraft | undefin
     const order = parsePriceCheck({ checks: [{ id, expectedOrder: ruleOrder }] })!;
     return { checkId: id, path: priceCheck.path, checks: [{ id, expectedOrder: order }] };
   }
+  const { checks } = setPlan(task);
   const selected = checks.find((check) => check.id === id);
   if (!selected) return;
-  const input = checks.map(({ id }) => ({ id, expectedCities: ruleCities[id] }));
-  return { checkId: selected.id, path: selected.path, checks: parseChecks({ checks: input })! };
+  const input = checks.map(({ id, required }) => ({ id, expectedCities: required }));
+  return { checkId: selected.id, path: selected.path, checks: parseChecks({ checks: input }, task)! };
 }
 
 export function workflowContract(task: Task, intent: WorkflowReply['intent'], guidance?: BuddyAnswer): WorkflowReply {
   const price = task.id === sortTask.id;
-  const claims = price ? priceClaims : cityClaims;
+  const claims = price ? priceClaims : task.comparison ? archiveClaims : cityClaims;
   if (intent === 'review') return {
     intent, checks: [], claims: Object.keys(claims).flatMap((key) => [key, 'not-' + key]),
     hint: [
       'Извлеки только тезисы, которые стажёр сообщает как факт. Сохрани отрицание префиксом not-. Сомнение, вопрос, условие, причина и пересказ чужого мнения не являются тезисами стажёра. Если смысл неясен, верни claims=[].',
       'Верни kind=feedback, text="Вывод разобран" и claims, в котором только ID утверждений, явно сделанных стажёром. Если оба запроса работают, отметь main-correct и control-correct. Если стажёр упоминает контрольный запрос, не приписывай ему вывод о запросе без фильтра.',
-      'Пример: «числа возрастают, значит порядок верный» даёт numeric-ascending и sort-correct. Для тезиса «карточка без цены пропала» верни null-missing, даже если тезис ложный. «карточка без цены не пропала» даёт not-null-missing. Аналогично «Самары нет» даёт main-missing-samara. Для темы вне задачи верни insufficient, sources=[] и claims=[].',
+      task.comparison ? 'Фразу «Без фильтра пропали архивные товары» обозначь как main-missing-archive. Для темы вне задачи верни insufficient, sources=[] и claims=[].'
+        : 'Пример: «числа возрастают, значит порядок верный» даёт numeric-ascending и sort-correct. Для тезиса «карточка без цены пропала» верни null-missing, даже если тезис ложный. «карточка без цены не пропала» даёт not-null-missing. Аналогично «Самары нет» даёт main-missing-samara. Для темы вне задачи верни insufficient, sources=[] и claims=[].',
       `Утверждения: ${JSON.stringify(claims)}`,
     ].join('\n'),
   };
   const selected = guidance?.draft?.checkId;
   const clarificationRequired = !price && guidance?.kind === 'clarification';
   const selections: WorkflowReply['checks'] = price ? [{ id: 'price-asc', expected: ruleOrder }]
-    : checks.filter(({ id }) => !selected || id === selected).map(({ id }) => ({ id, expected: ruleCities[id] }));
+    : setPlan(task).checks.filter(({ id }) => !selected || id === selected).map(({ id, required }) => ({ id, expected: required }));
   return {
     intent, checks: selections, clarificationRequired, draftRequired: Boolean(selected),
     hint: [
       'Стажёр описывает предполагаемую проверку своими словами. Верни draft, если можно выбрать запрос. Признай верную часть ожидания, объясни ошибку или уточни, чего не хватает.',
-      'В draft укажи один checkId и его expected из каталога в заданном порядке. Это ожидаемое по правилу, даже если стажёр предложил другое. Обязательно укажи rule:2 для price-asc и kazan или rule:1 для without-city.',
-      'Для SORT-01 объясни, зачем учитывать объявление без цены. Для SEARCH-01 при неизвестном фильтре задай один вопрос: был ли запрос без фильтра или с city=kazan. Упоминание Казани в ответе не означает, что город задан в запросе.',
+      'В draft укажи один checkId и его expected из каталога в заданном порядке. Это ожидаемое по правилу, даже если стажёр предложил другое. В rule:1 описан основной запрос, в rule:2 контрольный запрос или карточка без цены.',
+      task.comparison ? 'Основное поручение проверяет сохранение архивных товаров. Успешный status=active проверяет фильтр. Если сформулирована пропажа товара в общей выдаче, выбери all-statuses.'
+        : 'Для SORT-01 объясни, зачем учитывать объявление без цены. Для SEARCH-01 при неизвестном фильтре задай один вопрос: был ли запрос без фильтра или с city=kazan. Упоминание Казани в ответе не означает, что город задан в запросе.',
       'Для clarification и insufficient передай пустые checkId, expected и sources.',
       clarificationRequired
-        ? 'Фильтр неизвестен. Ответ: {"kind":"clarification","text":"Каким был запрос: без фильтра или с city=kazan?","checkId":"","expected":[],"sources":[]}'
+        ? `Фильтр неизвестен. Ответ: ${JSON.stringify({ kind: 'clarification', text: guidance?.text, checkId: '', expected: [], sources: [] })}`
         : `Пример структуры черновика: ${JSON.stringify({ kind: 'draft',
           text: 'Кратко объясни правило и оцени предположение стажёра.',
-          checkId: selections[0].id, expected: selections[0].expected, sources: [price ? 'rule:2' : 'rule:1'] })}`,
+          checkId: selections[0].id, expected: selections[0].expected, sources: [`rule:${checkRuleNumber(selections[0].id)}`] })}`,
       `Каталог разрешённых ожиданий: ${JSON.stringify(selections)}`,
     ].join(' '),
   };
 }
 
 export function guidePlan(task: Task, query: string, followUp?: Reply['followUp']): BuddyAnswer | undefined {
+  if (task.comparison) {
+    const control = /status\s*=\s*active|контроль|фильтр по активн/.test(query);
+    const primary = /без (?:фильтра|параметр)|фильтра не было|достаточно|хватит/.test(query) || (!control && /архив/.test(query))
+      || (followUp === 'filter' && /^нет[.!? ]*$/.test(query));
+    if (!control && !primary) {
+      if (/активн|одн.{0,6}групп/.test(query)) return {
+        kind: 'clarification', text: 'Запрос был без фильтра или с status=active?', mode: 'guide', sources: [],
+      };
+      return;
+    }
+    const checkId = primary ? 'all-statuses' : 'active-only';
+    return { kind: 'draft', mode: 'guide', draft: draftFor(task, checkId), text: archiveDraftText(task, checkId),
+      sources: [{ instructionId: task.instruction.id, ruleNumber: checkRuleNumber(checkId) }] };
+  }
   const price = task.id === sortTask.id;
   const search = guideIntent(query, followUp);
   const currencyOrder = /500.{0,25}900/.test(query);
@@ -80,6 +97,11 @@ export function guidePlan(task: Task, query: string, followUp?: Reply['followUp'
     sources: [{ instructionId: task.instruction.id, ruleNumber: checkId === 'without-city' ? 1 : 2 }] };
 }
 
+export function archiveDraftText(task: Task, id: DraftCheck['id']) {
+  const number = checkRuleNumber(id);
+  return `Пункт ${number}. ${task.instruction.rules[number - 1]} Успешный контроль по активным товарам проверяет фильтр. Чтобы обнаружить пропажу архивных товаров, нужен запрос без фильтра.`;
+}
+
 export function pricePlanNote(query: string) {
   if (/без цены|без ценника|null/.test(query) && !/не (?:исключ|убер|убират|отброс|выки)/.test(query)
     && /исключ|убер|убрат|игнорир|отброс|выки/.test(query)) {
@@ -98,7 +120,7 @@ export function guideFeedback(run: Run, query: string, claims?: string[]): Buddy
   const { verdicts, ids, hypothesis } = reviewClaims(run, query, claims);
   const sources = run.checks.filter(({ id }) => ids.has(id)).flatMap(({ id, label }) => [
     { runId: run.id, checkId: id, label },
-    { instructionId: run.task.instruction.id, ruleNumber: id === 'without-city' ? 1 : 2 },
+    { instructionId: run.task.instruction.id, ruleNumber: checkRuleNumber(id) },
   ]);
   const labels = { confirmed: 'Подтверждено', refuted: 'Опровергнуто', observation: 'Наблюдение', unclear: 'Нужно уточнение' };
   const text = [...verdicts.map(({ status, text }) => `${labels[status]} · ${text}`), hypothesis].filter(Boolean).join(' ');

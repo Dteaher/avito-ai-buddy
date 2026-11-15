@@ -1,14 +1,20 @@
 import { randomBytes } from 'node:crypto';
 import { resolve } from 'node:path';
 import express, { type ErrorRequestHandler, type Request, type RequestHandler } from 'express';
-import type { DemoIdentity, Preparation, Workspace } from '../shared/contracts.ts';
+import type { AttemptChoice, CheckInput, DemoIdentity, Preparation, Task, Workspace } from '../shared/contracts.ts';
 import { parseBuddyQuestion, type createBuddy } from './buddy.ts';
-import { checks, executeRun, isObject, listings, parseChecks, task } from './scenario.ts';
+import { executeRun, isObject, listings, parseChecks, setPlan, task } from './scenario.ts';
 import { executePriceRun, parsePriceCheck, priceCheck, priceItems, sortTask } from './price-scenario.ts';
 import type { createStore } from './store.ts';
 import { assignedTrainee, findIdentity, identities } from './demo-identities.ts';
+import { archiveTask, products } from './archive-scenario.ts';
 
-const assignedTasks = [task, sortTask];
+const demoTasks = [task, sortTask];
+
+function attemptChoice(checks: CheckInput[], id: unknown): AttemptChoice | undefined {
+  const selected = checks.find((check) => check.id === id);
+  if (selected) return { checkId: selected.id, expected: selected.expectedCities, checks };
+}
 
 interface AppOptions {
   store: ReturnType<typeof createStore>;
@@ -22,6 +28,9 @@ export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) 
   app.disable('x-powered-by');
   const cookieName = 'buddy_session';
   let standFixed = false;
+  const inventoryHeaders = { 'X-Demo-Inventory-Key': randomBytes(24).toString('hex') };
+  const taskFor = (id: unknown, owner: DemoIdentity['id']) => demoTasks.find((candidate) => candidate.id === id)
+    ?? (id === archiveTask.id ? store.assignment(archiveTask.id, owner) : undefined);
   const sessionLifetime = 30 * 24 * 60 * 60 * 1000;
   const tokenFrom = (req: Request) => req.headers.cookie?.match(/(?:^|;\s*)buddy_session=([0-9a-f]{48})(?:;|$)/)?.[1];
   const identityFrom = (req: Request) => {
@@ -66,23 +75,44 @@ export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) 
     res.json({ items: standFixed && !filters.length ? listings : listings.filter(({ city }) => city === 'kazan') });
   });
 
+  app.get('/demo/inventory', (req, res) => {
+    if (req.get('X-Demo-Inventory-Key') !== inventoryHeaders['X-Demo-Inventory-Key']) {
+      res.sendStatus(404);
+      return;
+    }
+    const filters = Object.keys(req.query);
+    if (filters.length && !(filters.length === 1 && req.query.status === 'active')) {
+      res.status(400).json({ message: 'Поддерживается status=active.' });
+      return;
+    }
+    res.set('X-Avito-Demo-Stand', standFixed ? 'fixed' : 'defect');
+    res.set('Cache-Control', 'no-store');
+    res.json({ items: standFixed && !filters.length ? products : products.filter(({ status }) => status === 'active') });
+  });
+
   app.use('/api', (_req, res, next) => {
     res.set('Cache-Control', 'no-store');
     next();
   });
   app.get('/api/workspace', (req, res) => {
     const selected = req.query.task ?? task.id;
-    if (!assignedTasks.some(({ id }) => id === selected)) {
+    const existing = identityFrom(req);
+    const identity = existing ?? identities[0];
+    const current = taskFor(selected, identity.id);
+    if (!current) {
       res.status(404).json({ message: 'Задача недоступна в этой сессии.' });
       return;
     }
-    const existing = identityFrom(req);
-    const identity = existing ?? identities[0];
     if (!existing) setSession(res, identity);
-    const context = { tasks: assignedTasks, identity, standFixed, buddyMode: buddy.mode, buddyProvider: buddy.provider };
+    const assigned = store.assignment(archiveTask.id, identity.id);
+    const tasks = assigned ? [...demoTasks, assigned] : demoTasks;
+    const context = { tasks, identity, standFixed, buddyMode: buddy.mode, buddyProvider: buddy.provider,
+      assignmentOffer: identity.role === 'mentor' ? { id: archiveTask.id, title: archiveTask.title,
+        version: archiveTask.instruction.version, assigned: Boolean(store.assignment(archiveTask.id, assignedTrainee(identity.id))) } : undefined };
     const workspace: Workspace = selected === sortTask.id
       ? { ...context, kind: 'price-order', task: sortTask, checks: [priceCheck], orderItems: priceItems }
-      : { ...context, task, checks: [...checks] };
+      : { ...context, task: current, checks: setPlan(current).checks.map(({ id, label, path, parameter }) => ({ id, label, path, parameter })),
+        attemptId: current.comparison ? store.openAttempt(current.id, identity.id) : undefined };
     res.json(workspace);
   });
 
@@ -108,12 +138,49 @@ export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) 
   });
 
   const assignedTask: RequestHandler = (req, res, next) => {
-    if (res.locals.identity.role !== 'trainee' || !assignedTasks.some(({ id }) => id === req.params.taskId)) {
+    const current = res.locals.identity.role === 'trainee' ? taskFor(req.params.taskId, res.locals.identity.id) : undefined;
+    if (!current) {
       res.status(404).json({ message: 'Задача недоступна в этой сессии.' });
       return;
     }
+    res.locals.task = current;
     next();
   };
+
+  app.post('/api/assignments', (req, res) => {
+    const mentor: DemoIdentity = res.locals.identity;
+    if (mentor.role !== 'mentor') {
+      res.status(403).json({ message: 'Поручение назначает наставник.' });
+      return;
+    }
+    const traineeId = assignedTrainee(mentor.id);
+    if (req.body?.templateId !== archiveTask.id || req.body?.traineeId !== traineeId) {
+      res.status(400).json({ message: 'Выбери поручение и своего стажёра.' });
+      return;
+    }
+    const created = store.assign(archiveTask, traineeId, mentor.id);
+    res.status(created ? 201 : 200).json({ task: store.assignment(archiveTask.id, traineeId), traineeId });
+  });
+
+  app.get('/api/tasks/:taskId/instruction', assignedTask, (_req, res) => {
+    res.json(res.locals.task.instruction);
+  });
+
+  app.post('/api/tasks/:taskId/attempt', assignedTask, (req, res) => {
+    const current: Task = res.locals.task;
+    const { attemptId, checkId, checks } = req.body ?? {};
+    const input = current.comparison ? parseChecks({ checks }, current) : undefined;
+    const choice = input && attemptChoice(input, checkId);
+    if (typeof attemptId !== 'string' || !choice) {
+      res.status(400).json({ message: 'Выбери запрос и отметь ожидаемые группы для обеих проверок.' });
+      return;
+    }
+    if (!store.setFirstChoice(attemptId, current.id, res.locals.identity.id, choice)) {
+      res.status(409).json({ message: 'Первоначальный выбор уже зафиксирован или попытка недоступна.' });
+      return;
+    }
+    res.json(choice);
+  });
 
   app.post('/api/demo/stand', (req, res) => {
     if (res.locals.identity.role !== 'mentor') {
@@ -134,11 +201,16 @@ export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) 
       res.status(400).json({ message: 'Проверь вопрос и попробуй ещё раз. Максимум 500 символов.' });
       return;
     }
-    const current = req.params.taskId === sortTask.id ? sortTask : task;
+    const current: Task = res.locals.task;
     const owner: DemoIdentity['id'] = res.locals.identity.id;
     const run = input.runId ? store.readRun(input.runId, owner, current.id) : undefined;
     if (input.runId && !run) {
       res.status(404).json({ message: 'Прогон недоступен в этой задаче.' });
+      return;
+    }
+    if (current.comparison && !run && input.mode !== 'manual'
+      && (!input.attemptId || !store.noteHelp(input.attemptId, current.id, owner))) {
+      res.status(409).json({ message: 'Открой поручение заново для новой попытки.' });
       return;
     }
     const requestLifetime = new AbortController();
@@ -161,29 +233,52 @@ export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) 
   });
 
   app.post('/api/tasks/:taskId/runs', assignedTask, async (req, res) => {
-    const priceTask = req.params.taskId === sortTask.id;
-    const { preparation, ...input } = isObject(req.body) ? req.body : {};
+    const current: Task = res.locals.task;
+    const owner: DemoIdentity['id'] = res.locals.identity.id;
+    const priceTask = current.id === sortTask.id;
+    const { preparation, attemptId, checkId: selectedCheck, ...input } = isObject(req.body) ? req.body : {};
     const order = priceTask ? parsePriceCheck(input) : undefined;
-    const cities = priceTask ? undefined : parseChecks(input);
+    const cities = priceTask ? undefined : parseChecks(input, current);
     const question = isObject(preparation) && typeof preparation.question === 'string' ? preparation.question.trim() : '';
     const checkId = isObject(preparation) && preparation.checkId;
     const hasPreparation = isObject(preparation) && preparation.source === 'buddy-draft' && question.length > 0 && question.length <= 500
-      && (priceTask ? checkId === priceCheck.id : checks.some(({ id }) => id === checkId));
+      && (priceTask ? checkId === priceCheck.id : setPlan(current).checks.some(({ id }) => id === checkId));
     if ((!order && !cities) || (preparation !== undefined && !hasPreparation)) {
       res.status(400).json({ message: priceTask
         ? 'Задай ожидаемый порядок всех трёх объявлений.'
-        : 'Выбери ожидаемые города для обоих разрешённых запросов.' });
+        : current.comparison ? 'Выбери ожидаемые статусы для обоих разрешённых запросов.'
+          : 'Выбери ожидаемые города для обоих разрешённых запросов.' });
+      return;
+    }
+    const choice = current.comparison && cities ? attemptChoice(cities, selectedCheck) : undefined;
+    if (current.comparison && (!choice || typeof attemptId !== 'string')) {
+      res.status(400).json({ message: 'Выбери основной запрос для своей проверки.' });
+      return;
+    }
+    const locked = choice && typeof attemptId === 'string' ? store.lockAttempt(attemptId, current.id, owner) : undefined;
+    if (choice && !locked) {
+      res.status(409).json({ message: 'Попытка использована. Открой поручение заново.' });
       return;
     }
     let run;
     try {
-      run = order ? await executePriceRun(standOrigin(), order) : await executeRun(standOrigin(), cities!);
+      run = order ? await executePriceRun(standOrigin(), order) : await executeRun(standOrigin(), cities!, current,
+        current.comparison ? inventoryHeaders : undefined);
     } catch {
+      if (locked && typeof attemptId === 'string') store.releaseAttempt(attemptId, current.id, owner);
       res.status(502).json({ message: 'Стенд не ответил как ожидалось. Повтори запуск, ожидание сохранено.' });
       return;
     }
     if (hasPreparation) run.preparation = { question, checkId: checkId as Preparation['checkId'], source: 'buddy-draft' };
-    store.saveRun(run, res.locals.identity.id);
+    if (locked && choice && typeof attemptId === 'string') {
+      run.attempt = { first: locked.first, final: choice, help: locked.help };
+      try {
+        store.saveAttemptRun(attemptId, run, owner);
+      } catch (error) {
+        store.releaseAttempt(attemptId, current.id, owner);
+        throw error;
+      }
+    } else store.saveRun(run, owner);
     res.status(201).json(run);
   });
 
@@ -207,7 +302,7 @@ export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) 
 
   app.get('/api/records/:id', (req, res) => {
     const record = store.readRecord(req.params.id, assignedTrainee(res.locals.identity.id));
-    if (!record || !assignedTasks.some(({ id }) => id === record.run.task.id)) {
+    if (!record || !taskFor(record.run.task.id, assignedTrainee(res.locals.identity.id))) {
       res.status(404).json({ message: 'Запись не найдена. Проверь ссылку или открой рабочее пространство.' });
       return;
     }
@@ -252,17 +347,19 @@ export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) 
       return;
     }
     const original = record.run;
+    const current = taskFor(original.task.id, owner);
     const order = original.kind === 'price-order' && original.checks[0].path === priceCheck.path
       ? parsePriceCheck({ checks: original.checks.map(({ id, expectedOrder }) => ({ id, expectedOrder })) }) : undefined;
-    const cities = original.kind !== 'price-order' && original.checks.every(({ id, path }) => checks.some((check) => check.id === id && check.path === path))
-      ? parseChecks({ checks: original.checks.map(({ id, expectedCities }) => ({ id, expectedCities })) }) : undefined;
+    const cities = current && original.kind !== 'price-order' && original.checks.every(({ id, path }) => setPlan(current).checks.some((check) => check.id === id && check.path === path))
+      ? parseChecks({ checks: original.checks.map(({ id, expectedCities }) => ({ id, expectedCities })) }, current) : undefined;
     if (!order && !cities) {
       res.status(409).json({ message: 'Каталог изменился. Подготовь новый запрос по текущей инструкции.' });
       return;
     }
     let replay;
     try {
-      replay = order ? await executePriceRun(standOrigin(), order) : await executeRun(standOrigin(), cities!);
+      replay = order ? await executePriceRun(standOrigin(), order) : await executeRun(standOrigin(), cities!, current,
+        current?.comparison ? inventoryHeaders : undefined);
     } catch {
       res.status(502).json({ message: 'Стенд недоступен для повтора. Исходная запись сохранена.' });
       return;

@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import { ArrowRight, ArrowUp, ArrowUpRight, BookOpen, ChevronDown, LoaderCircle, Sparkles, Terminal, X } from 'lucide-react';
-import { cities, type BuddyAnswer, type BuddyQuestion, type CheckDraft, type Instruction, type PriceListing, type Run, type RunEvidenceSource, type Workspace } from '../shared/contracts';
+import { groupLabels, type BuddyAnswer, type BuddyQuestion, type CheckDraft, type Instruction, type PriceListing, type Run, type RunEvidenceSource, type Workspace } from '../shared/contracts';
 import { errorMessage, post, request } from './api';
 import { Evidence, formatTime } from './Evidence';
 import { Escalation } from './Escalation';
@@ -9,7 +9,7 @@ const suggestions = ['Ответа 200 достаточно?', 'Как пров�
 const priceSuggestions = ['Достаточно, что 500 и 900 идут по порядку?', 'Куда поставить объявление без цены?'];
 
 interface Props {
-  workspace: Pick<Workspace, 'task' | 'kind' | 'buddyMode' | 'buddyProvider'>;
+  workspace: Pick<Workspace, 'task' | 'kind' | 'buddyMode' | 'buddyProvider' | 'attemptId'>;
   openSource: (ruleNumber?: number) => void;
   run?: Run;
   collapsible?: boolean;
@@ -52,7 +52,7 @@ export function Buddy({ workspace, openSource, run, collapsible = false, intent,
     const previous = related.findLast(({ answer }) => answer)?.answer;
     const conversationId = related.findLast(({ answer }) => answer?.conversationId)?.answer?.conversationId;
     const input: BuddyQuestion = { question: text, clarificationId: previous?.clarificationId, conversationId,
-      runId: requestedIntent ? undefined : run?.id, intent: requestedIntent, mode };
+      runId: requestedIntent ? undefined : run?.id, intent: requestedIntent, mode, attemptId: run ? undefined : workspace.attemptId };
     const exchange = { question: text, intent: requestedIntent, mode };
     setFailure('');
     setPending(true);
@@ -122,9 +122,10 @@ export function Buddy({ workspace, openSource, run, collapsible = false, intent,
             <div className="welcome">
               <p className="bubble assistant">{workspace.kind === 'price-order'
                 ? 'Попробуй задать порядок по инструкции. Если сомневаешься, спроси меня.'
-                : 'Помогу разобраться в задаче и сверить ожидания с правилами команды. С чего начнём?'}</p>
+                : task.comparison ? 'Можно сначала сохранить свой вариант. Если понадобится подсказка, напиши, что хочешь проверить.'
+                  : 'Помогу разобраться в задаче и сверить ожидания с правилами команды. С чего начнём?'}</p>
               <div className="suggestions">
-                {(workspace.kind === 'price-order' ? priceSuggestions : suggestions).map((question) => (
+                {(workspace.kind === 'price-order' ? priceSuggestions : task.comparison ? ['Достаточно проверить активные товары?'] : suggestions).map((question) => (
                   <button key={question} type="button" onClick={() => void ask(question, true)}>{question}<ArrowUpRight size={15} /></button>
                 ))}
               </div>
@@ -144,9 +145,9 @@ export function Buddy({ workspace, openSource, run, collapsible = false, intent,
                   ? check.expectedOrder.map((id) => {
                     const item = orderItems?.find((entry) => entry.id === id);
                     return item?.price == null ? 'без цены' : `${item.price} ₽`;
-                  }).join(' → ') : check.expectedCities.map((city) => cities[city]).join(' · '))}</p>
+                  }).join(' → ') : check.expectedCities.map((city) => groupLabels[city]).join(' · '))}</p>
                 {answer.draft.checks.filter(({ id }) => id !== answer.draft?.checkId).map((check) => 'expectedCities' in check &&
-                  <p key={check.id}>{check.id === 'kazan' ? 'С фильтром' : 'Без фильтра'} · {check.expectedCities.map((city) => cities[city]).join(' · ')}</p>)}
+                  <p key={check.id}>{check.id === 'kazan' || check.id === 'active-only' ? 'С фильтром' : 'Без фильтра'} · {check.expectedCities.map((city) => groupLabels[city]).join(' · ')}</p>)}
                 {onDraft && mode === answerMode && !run && <button type="button" className="button secondary"
                   onClick={() => { setExpanded(false); onDraft(answer.draft!, question); }}>Использовать черновик</button>}
               </div>}

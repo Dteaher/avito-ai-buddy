@@ -1,4 +1,4 @@
-import { cities, type PriceResult, type Run } from './contracts.ts';
+import { groupLabels, type PriceResult, type Run } from './contracts.ts';
 
 type PriceEvidence = Pick<PriceResult, 'items' | 'fixtures' | 'expectedOrder' | 'actualOrder' | 'ruleOrder'>;
 
@@ -63,12 +63,13 @@ export function summarizeRun(run: Run) {
     if ('ruleCities' in check) {
       const missing = check.ruleCities.filter((city) => !check.actualCities.includes(city));
       const extra = check.actualCities.filter((city) => !check.ruleCities.includes(city));
-      const list = (values: typeof check.ruleCities) => values.map((city) => cities[city]).join(', ') || 'пусто';
+      const list = (values: typeof check.ruleCities) => values.map((city) => groupLabels[city]).join(', ') || 'пусто';
+      const groups = run.task.comparison ? 'группы' : 'города';
       const differences = [
-        missing.length && `Отсутствуют города: ${list(missing)}.`,
-        extra.length && `Лишние города: ${list(extra)}.`,
+        missing.length && `Отсутствуют ${groups}: ${list(missing)}.`,
+        extra.length && `Лишние ${groups}: ${list(extra)}.`,
       ].filter(Boolean).join(' ');
-      return `${request} По правилу: ${list(check.ruleCities)}. Стенд вернул: ${list(check.actualCities)}. ${differences || 'Города соответствуют правилу.'}`;
+      return `${request} По правилу: ${list(check.ruleCities)}. Стенд вернул: ${list(check.actualCities)}. ${differences || 'Состав соответствует правилу.'}`;
     }
     const labels = (ids: string[], items: typeof check.fixtures) => ids.slice(0, 12).map((id) => {
       const item = items.find((entry) => entry.id === id);

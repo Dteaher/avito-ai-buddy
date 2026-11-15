@@ -1,6 +1,6 @@
-import { cities, type BuddyAnswer, type BuddySource, type CheckResult, type Run, type Task } from '../shared/contracts.ts';
+import { checkRuleNumber, groupLabels, type BuddyAnswer, type BuddySource, type CheckResult, type Run, type Task } from '../shared/contracts.ts';
 import { priceCheck, sortTask } from './price-scenario.ts';
-import { checks } from './scenario.ts';
+import { setPlan } from './scenario.ts';
 import { summarizeRun } from '../shared/run-summary.ts';
 
 export interface EvidenceEntry {
@@ -9,7 +9,7 @@ export interface EvidenceEntry {
 }
 
 function cityList(list: CheckResult['actualCities']) {
-  return list.map((city) => cities[city]).join(', ') || 'пусто';
+  return list.map((city) => groupLabels[city]).join(', ') || 'пусто';
 }
 
 function summarize(check: CheckResult) {
@@ -25,19 +25,19 @@ function summarize(check: CheckResult) {
 
 export function buddyEvidence(task: Task, run?: Run) {
   const evidence = new Map<string, EvidenceEntry>();
-  const requests = run?.checks ?? (task.id === sortTask.id ? [priceCheck] : checks);
+  const requests = run?.checks ?? (task.id === sortTask.id ? [priceCheck] : setPlan(task).checks);
   task.instruction.rules.forEach((rule, index) => {
     const ruleNumber = index + 1;
     const check = requests[index];
     const facts = check ? `${rule} Разрешённый запрос — GET ${check.path}.` : rule;
     evidence.set(`rule:${ruleNumber}`, { source: { instructionId: task.instruction.id, ruleNumber }, facts });
   });
-  if (run) for (const check of run.checks) {
+  if (run) for (const [index, check] of run.checks.entries()) {
     const result = check.matches ? 'Совпало с ожиданием.' : 'Расхождение с ожиданием.';
     const rule = check.followsRule ? 'Ожидание соответствует инструкции прогона.' : 'Ожидание расходится с инструкцией прогона.';
     evidence.set(`run:${check.id}`, {
       source: { runId: run.id, checkId: check.id, label: check.label },
-      facts: 'actualOrder' in check ? `${summarizeRun(run)[0]} ${rule}` : `GET ${check.path} · HTTP ${check.status}. ${summarize(check)} ${result} ${rule}`,
+      facts: 'actualOrder' in check || run.task.comparison ? `${summarizeRun(run)[index]} ${rule}` : `GET ${check.path} · HTTP ${check.status}. ${summarize(check)} ${result} ${rule}`,
     });
   }
   return evidence;
@@ -49,7 +49,7 @@ export function guideRunAnswer(query: string, run: Run | undefined, evidence: Ma
   let relevant: Run['checks'][number][] = [primary];
   if (control) {
     const mentionsPrimary = /основн|без (?:города|фильтра)/.test(query);
-    const mentionsControl = /контроль|city\s*=\s*kazan|фильтр по казани/.test(query);
+    const mentionsControl = /контроль|city\s*=\s*kazan|status\s*=\s*active|фильтр по казани/.test(query);
     if ((mentionsPrimary && mentionsControl) || /оба|дв[ае]|кажд|запросы|что показал прогон/.test(query)) relevant = [primary, control];
     else if (mentionsControl) relevant = [control];
     else if (!mentionsPrimary && /расхожд/.test(query)) {
@@ -61,7 +61,7 @@ export function guideRunAnswer(query: string, run: Run | undefined, evidence: Ma
   const status = /\b200\b|код ответа|статус/.test(query) ? evidence.get('rule:3') : undefined;
   if (status) entries.unshift(status);
   for (const check of relevant.filter(({ followsRule }) => !followsRule)) {
-    const rule = evidence.get(check.id === 'without-city' ? 'rule:1' : 'rule:2');
+    const rule = evidence.get(`rule:${checkRuleNumber(check.id)}`);
     if (rule) entries.push(rule);
   }
   return { kind: 'guidance', text: entries.map(({ facts }) => facts).join('\n\n'), sources: entries.map(({ source }) => source) };

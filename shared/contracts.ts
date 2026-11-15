@@ -1,6 +1,11 @@
 export const cities = { kazan: 'Казань', samara: 'Самара' } as const;
-export type City = keyof typeof cities;
-export type CheckId = 'without-city' | 'kazan';
+export const groupLabels = { ...cities, active: 'Активные', archived: 'Архивные' } as const;
+export type City = keyof typeof groupLabels;
+export type CheckId = 'without-city' | 'kazan' | 'all-statuses' | 'active-only';
+
+export function checkRuleNumber(id: CheckId | 'price-asc') {
+  return id === 'without-city' || id === 'all-statuses' ? 1 : 2;
+}
 
 export interface Instruction {
   id: string;
@@ -16,6 +21,11 @@ export interface Task {
   description: string;
   criterion: string;
   instruction: Instruction;
+  comparison?: {
+    field: 'status';
+    values: City[];
+    checks: [Check & { required: City[] }, Check & { required: City[] }];
+  };
 }
 
 interface RequestDefinition {
@@ -39,6 +49,8 @@ interface WorkspaceBase {
   buddyProvider?: 'local' | 'remote';
   identity?: DemoIdentity;
   standFixed?: boolean;
+  attemptId?: string;
+  assignmentOffer?: { id: string; title: string; version: string; assigned: boolean };
 }
 
 export type DemoIdentityId = 'demo-trainee' | 'demo-trainee-b' | 'demo-mentor';
@@ -100,6 +112,13 @@ interface RunBase {
   task: Task;
   checkedAt: string;
   preparation?: Preparation;
+  attempt?: { first?: AttemptChoice; final: AttemptChoice; help: 'none' | 'before-choice' | 'after-choice' };
+}
+
+export interface AttemptChoice {
+  checkId: CheckId;
+  expected: City[];
+  checks: CheckInput[];
 }
 
 export interface Preparation {
@@ -148,6 +167,7 @@ export interface BuddyQuestion {
   runId?: string;
   intent?: 'plan' | 'review';
   mode?: 'guide' | 'manual';
+  attemptId?: string;
 }
 
 export interface RunEvidenceSource {

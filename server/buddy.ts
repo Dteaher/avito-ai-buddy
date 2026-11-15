@@ -1,19 +1,19 @@
 import { randomUUID } from 'node:crypto';
-import type { BuddyAnswer, BuddyQuestion, BuddySource, Run, Task, Workspace } from '../shared/contracts.ts';
+import { checkRuleNumber, type BuddyAnswer, type BuddyQuestion, type BuddySource, type Run, type Task, type Workspace } from '../shared/contracts.ts';
 import { buddyEvidence, guideRunAnswer } from './buddy-evidence.ts';
 import { guideIntent, isActionRequest, replies, type Reply } from './buddy-guide.ts';
 import { generateReply, ModelResponseError, readProvider, type DialogueMessage, type ReplyPlan } from './buddy-model.ts';
 import { priceIntent, priceReplies } from './price-guide.ts';
 import { sortTask } from './price-scenario.ts';
 import { isObject } from './scenario.ts';
-import { draftFor, escalation, guideFeedback, guidePlan, pricePlanNote, workflowContract } from './buddy-workflow.ts';
+import { archiveDraftText, draftFor, escalation, guideFeedback, guidePlan, pricePlanNote, workflowContract } from './buddy-workflow.ts';
 
 const clarificationLifetime = 10 * 60 * 1000;
 const conversationLifetime = 30 * 60 * 1000;
 const maxContexts = 32;
 const maxTurns = 3;
 const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
-const contextKeys = ['clarificationId', 'conversationId', 'runId'] as const;
+const contextKeys = ['clarificationId', 'conversationId', 'runId', 'attemptId'] as const;
 
 export function parseBuddyQuestion(body: unknown): BuddyQuestion | undefined {
   if (!isObject(body)) return;
@@ -103,8 +103,9 @@ export function createBuddy(env: NodeJS.ProcessEnv, observeModelAttempt?: () => 
 
   return {
     mode, provider: providerKind,
-    async answer(task: Task, { question, clarificationId, conversationId, intent, mode: requestedMode }: BuddyQuestion, run?: Run, signal?: AbortSignal, owner = ''): Promise<BuddyAnswer> {
-      const scope = `${requestedMode ?? 'default'}/${intent ?? 'chat'}/${intent ? run?.id ?? '' : ''}`;
+    async answer(task: Task, { question, clarificationId, conversationId, intent: requestedIntent, mode: requestedMode, attemptId }: BuddyQuestion, run?: Run, signal?: AbortSignal, owner = ''): Promise<BuddyAnswer> {
+      const intent = requestedIntent ?? (task.comparison && !run ? 'plan' : undefined);
+      const scope = `${requestedMode ?? 'default'}/${intent ?? 'chat'}/${intent ? run?.id ?? '' : ''}/${attemptId ?? ''}`;
       const bound = (entry?: Scope) => entry?.owner === owner && entry.scope === scope
         && entry.taskId === task.id && entry.expiresAt > Date.now();
       const previous = clarificationId ? clarifications.get(clarificationId) : undefined;
@@ -120,7 +121,9 @@ export function createBuddy(env: NodeJS.ProcessEnv, observeModelAttempt?: () => 
       if (intent === 'review' && !run) return {
         kind: 'insufficient', mode: 'guide', sources: [], text: 'Сначала выполни проверку или открой доступный прогон.',
       };
-      const local: Reply = price ? priceReplies[priceIntent(query, followUp === 'price')] : replies[guideIntent(query, followUp)];
+      const local: Reply = task.comparison
+        ? { kind: 'insufficient', text: 'В инструкции поручения есть правила основного запроса и фильтра по активным товарам. Какую часть выдачи нужно проверить?', rules: [] }
+        : price ? priceReplies[priceIntent(query, followUp === 'price')] : replies[guideIntent(query, followUp)];
       const groundingTask = run?.task ?? task;
       const evidence = buddyEvidence(groundingTask, run);
       const runAnswer = guideRunAnswer(query, run, evidence);
@@ -154,7 +157,7 @@ export function createBuddy(env: NodeJS.ProcessEnv, observeModelAttempt?: () => 
         try {
           const plan = intent ? undefined : planReply(query, answer, local, price, relatedTurns.at(-1), run);
           const relatedRules = selectedChecks?.flatMap(({ checkId }) => checkId === 'price-asc' ? ['rule:1', 'rule:2']
-            : [checkId === 'without-city' ? 'rule:1' : 'rule:2']);
+            : [`rule:${checkRuleNumber(checkId)}`]);
           const modelEvidence = selectedIds ? new Map([...evidence].filter(([id]) => selectedIds.has(id)
             || id === 'rule:3' || relatedRules?.includes(id))) : evidence;
           const workflow = intent ? workflowContract(groundingTask, intent, answer) : undefined;
@@ -179,7 +182,7 @@ export function createBuddy(env: NodeJS.ProcessEnv, observeModelAttempt?: () => 
           const text = checkId === 'price-asc'
             ? (answer.kind === 'draft' && pricePlanNote(query) ? answer.text
               : 'По пункту 2 карточку без цены оставляем в выдаче и ставим последней. Сравни позиции всех трёх карточек.')
-            : generated.text;
+            : checkId && groundingTask.comparison ? archiveDraftText(groundingTask, checkId) : generated.text;
           answer = {
             ...(generated.kind === 'feedback' && run ? guideFeedback(run, query, reviewClaims) : generated),
             ...(checkId ? { text } : {}),

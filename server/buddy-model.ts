@@ -1,4 +1,4 @@
-import type { BuddyAnswer, DraftCheck, Task } from '../shared/contracts.ts';
+import { checkRuleNumber, type BuddyAnswer, type DraftCheck, type Task } from '../shared/contracts.ts';
 import type { EvidenceEntry } from './buddy-evidence.ts';
 import { isObject } from './scenario.ts';
 
@@ -80,8 +80,9 @@ function decode(content: unknown, evidence: Map<string, EvidenceEntry>, plan?: R
     if (kind === 'draft') {
       if (!selected || expected.length !== selected.expected.length
         || !selected.expected.every((item, index) => item === expected[index])) throw new ModelResponseError();
-      const rule = evidence.get(selected.id === 'without-city' ? 'rule:1' : 'rule:2')!.source;
-      if (!cited.includes(selected.id === 'without-city' ? 'rule:1' : 'rule:2')) resolved.unshift(rule);
+      const ruleId = `rule:${checkRuleNumber(selected.id)}`;
+      const rule = evidence.get(ruleId)!.source;
+      if (!cited.includes(ruleId)) resolved.unshift(rule);
     } else if (checkId !== '' || expected.length) throw new ModelResponseError();
   }
   const reviewClaims: string[] = [];

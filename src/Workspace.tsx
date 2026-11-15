@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { ArrowLeft, ArrowRight, ArrowUpRight, BookOpen, Check, ChevronDown, CircleAlert, ListChecks, LoaderCircle } from 'lucide-react';
-import { cities, type BuddyQuestion, type CheckDraft, type CheckId, type City, type Preparation, type Publication, type Run, type Workspace as WorkspaceData } from '../shared/contracts';
+import { cities, groupLabels, type AttemptChoice, type BuddyQuestion, type CheckDraft, type CheckId, type City, type Preparation, type Publication, type Run, type Workspace as WorkspaceData } from '../shared/contracts';
 import heroImage from './assets/search-shapes.webp';
 import { errorMessage, post } from './api';
 import { Buddy, InstructionDialog, showInstruction } from './Buddy';
 import { Evidence, RunContext } from './Evidence';
 import { PriceOrderInput } from './PriceOrder';
 import { Conclusion } from './Conclusion';
+import { AttemptTrail } from './AttemptTrail';
 
 const stages = ['Правило', 'Ожидание', 'Проверить', 'Передать'];
 type Choices = Partial<Record<CheckId, City[]>>;
@@ -38,11 +39,20 @@ export function Workspace({ data, mode, chooseMode, revision }: {
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState('');
   const [animateResult, setAnimateResult] = useState(false);
+  const [selectedCheck, setSelectedCheck] = useState<CheckId | undefined>(revision?.run.attempt?.final.checkId);
+  const [firstChoice, setFirstChoice] = useState<AttemptChoice>();
+  const [savingChoice, setSavingChoice] = useState(false);
   const dialog = useRef<HTMLDialogElement>(null);
   const heading = useRef<HTMLHeadingElement>(null);
   const recordLink = useRef<HTMLAnchorElement>(null);
   const shouldFocus = useRef(false);
-  const actionReady = priceTask ? order.length === data.orderItems.length : data.checks.every(({ id }) => choices[id] !== undefined);
+  const actionReady = priceTask ? order.length === data.orderItems.length
+    : (!data.attemptId || Boolean(selectedCheck)) && data.checks.every(({ id }) => choices[id] !== undefined);
+  const expectedGroups = task.comparison?.values ?? Object.keys(cities) as City[];
+  const attemptInput = () => ({
+    attemptId: data.attemptId, checkId: data.attemptId ? selectedCheck : undefined,
+    checks: data.checks.flatMap(({ id }) => id === 'price-asc' ? [] : [{ id, expectedCities: choices[id] }]),
+  });
 
   useEffect(() => {
     if (shouldFocus.current) {
@@ -87,9 +97,22 @@ export function Workspace({ data, mode, chooseMode, revision }: {
       else choices[check.id] = check.expectedCities;
     }
     setChoices(choices);
+    if (data.attemptId && draft.checkId !== 'price-asc') setSelectedCheck(draft.checkId);
     setPreparation({ source: 'buddy-draft', question, checkId: draft.checkId });
     move(1);
     heading.current?.focus();
+  }
+
+  async function saveChoice() {
+    setSavingChoice(true);
+    setFailure('');
+    try {
+      setFirstChoice(await post<AttemptChoice>(`${taskPath}/attempt`, attemptInput()));
+    } catch (error) {
+      setFailure(errorMessage(error));
+    } finally {
+      setSavingChoice(false);
+    }
   }
 
   async function launch() {
@@ -97,9 +120,10 @@ export function Workspace({ data, mode, chooseMode, revision }: {
     setBusy(true);
     setFailure('');
     try {
+      const input = attemptInput();
       const result = await post<Run>(`${taskPath}/runs`, {
-        checks: priceTask ? [{ id: data.checks[0].id, expectedOrder: order }]
-          : data.checks.map(({ id }) => ({ id, expectedCities: choices[id] })),
+        ...input,
+        checks: priceTask ? [{ id: data.checks[0].id, expectedOrder: order }] : input.checks,
         preparation,
       });
       setRun(result);
@@ -146,9 +170,9 @@ export function Workspace({ data, mode, chooseMode, revision }: {
         <span>{revision.review?.comment}</span></p>}
 
       <nav className="task-nav" aria-label="Рабочие задачи">
-        {data.tasks.map(({ id }) => (
+        {data.tasks.map(({ id, comparison }) => (
           <a key={id} href={id === 'SEARCH-01' ? '/' : `/?task=${encodeURIComponent(id)}`} aria-current={id === task.id ? 'page' : undefined}>
-            {id === 'SEARCH-01' ? 'Фильтр по городу' : 'Сортировка по цене'}
+            {comparison ? 'Архивные товары' : id === 'SEARCH-01' ? 'Фильтр по городу' : 'Сортировка по цене'}
           </a>
         ))}
       </nav>
@@ -167,7 +191,7 @@ export function Workspace({ data, mode, chooseMode, revision }: {
           const done = index < furthest || Boolean(publication);
           return (
             <li key={label} className={done ? 'done' : undefined}>
-              <button type="button" disabled={busy || index > furthest} aria-current={current ? 'step' : undefined}
+              <button type="button" disabled={busy || index > furthest || Boolean(data.attemptId && run && index === 1)} aria-current={current ? 'step' : undefined}
                 aria-description={done ? 'Этап завершён' : undefined} onClick={() => move(index)}>
                 <span className="step-count" aria-hidden="true">{done ? <Check size={15} /> : index + 1}</span><span>{label}</span>
               </button>
@@ -190,38 +214,47 @@ export function Workspace({ data, mode, chooseMode, revision }: {
             <>
               <div className="panel-heading"><h2 id="stage-title" tabIndex={-1} ref={heading}>Что проверяем</h2></div>
               <p className="stage-intro">{task.description}</p>
-              <p className="first-task-note">Первая задача в команде поиска. Подготовь проверку API, зафиксируй результат и передай его наставнику.</p>
+              <p className="first-task-note">{task.comparison ? `Поручение наставника · версия правила ${task.instruction.version}` : 'Первая задача в команде поиска. Подготовь проверку API, зафиксируй результат и передай его наставнику.'}</p>
               {!priceTask && <div className="brief">
                 <span className="brief-icon"><ListChecks size={22} /></span>
                 <div><h3>Что считаем правильным</h3><p>{task.criterion}</p></div>
               </div>}
               <button type="button" className="text-link instruction-link" onClick={() => openSource()}><BookOpen size={18} /> Тестовая инструкция команды <ArrowUpRight size={15} /></button>
-              <div className="actions"><button type="button" className="button primary" onClick={() => move(1)}>Подготовить проверку <ArrowRight size={19} /></button></div>
+              <div className="actions">{data.attemptId && run ? <a href={`/?task=${task.id}`} className="button primary">Начать новую попытку</a>
+                : <button type="button" className="button primary" onClick={() => move(1)}>Подготовить проверку <ArrowRight size={19} /></button>}</div>
             </>
           )}
           {stage === 1 && (
             <>
               <div className="panel-heading"><h2 id="stage-title" tabIndex={-1} ref={heading}>Подготовить проверку</h2></div>
-              <p className="stage-intro">{priceTask ? 'Задай ожидаемую последовательность по тестовой инструкции.' : 'Выбери, какие города должны вернуться в каждом запросе.'}</p>
+              <p className="stage-intro">{priceTask ? 'Задай ожидаемую последовательность по тестовой инструкции.'
+                : task.comparison ? 'Выбери запрос, который проверяет поручение. При запуске выполним оба запроса и покажем ответы отдельно.'
+                  : 'Выбери, какие города должны вернуться в каждом запросе.'}</p>
               <details className="response-details rule-expectation">
                 <summary>Ожидание по инструкции</summary>
                 <p>{task.criterion}</p>
                 <button type="button" className="text-link" onClick={() => openSource()}>Открыть пункты инструкции <ArrowUpRight size={15} /></button>
               </details>
               {preparation && <p className="fallback-note" role="status">Черновик в форме. Проверь ожидание и при необходимости измени его.</p>}
+              {data.attemptId && <fieldset className="attempt-pick" disabled={busy || savingChoice}>
+                <legend>Какой запрос проверяет поручение?</legend>
+                {data.checks.map(({ id, label }) => <label key={id}>
+                  <input type="radio" name="check-choice" checked={selectedCheck === id} onChange={() => setSelectedCheck(id as CheckId)} /> {label}
+                </label>)}
+              </fieldset>}
               {priceTask ? <PriceOrderInput check={data.checks[0]} items={data.orderItems} order={order} disabled={busy} onChange={(next) => {
                 setOrder(next);
                 clearResult();
               }} /> : data.checks.map((check, index) => {
                 const selected = choices[check.id];
                 return (
-                  <fieldset className="expectation" key={check.id} disabled={busy}>
+                  <fieldset className="expectation" key={check.id} disabled={busy || savingChoice}>
                     <legend>{index === 0 ? 'Основной запрос' : 'Контрольный запрос'}</legend>
                     <div className="request-heading"><span className="endpoint"><span>GET</span><code>{check.path}</code></span><span className="parameter">{check.parameter}</span></div>
-                    <span className="field-label">Ожидаемые города</span>
+                    <span className="field-label">{task.comparison ? 'Ожидаемые группы' : 'Ожидаемые города'}</span>
                     <div className="choices">
-                      {(Object.keys(cities) as City[]).map((city) => (
-                        <button type="button" key={city} aria-pressed={selected?.includes(city) ?? false} onClick={() => select(check.id, city)}>{cities[city]}</button>
+                      {expectedGroups.map((city) => (
+                        <button type="button" key={city} aria-pressed={selected?.includes(city) ?? false} onClick={() => select(check.id, city)}>{groupLabels[city]}</button>
                       ))}
                       <button type="button" aria-pressed={selected?.length === 0} onClick={() => select(check.id)}>Пустая выдача</button>
                     </div>
@@ -230,7 +263,10 @@ export function Workspace({ data, mode, chooseMode, revision }: {
               })}
               {failure && <p className="action-error" role="alert"><CircleAlert size={19} />{failure}</p>}
               <div className="actions">
-                <button type="button" className="button primary run-action" disabled={!actionReady} aria-disabled={busy || undefined} onClick={() => void launch()}>
+                {data.attemptId && !firstChoice && <button type="button" className="button secondary" disabled={!actionReady || savingChoice || busy}
+                  onClick={() => void saveChoice()}>{savingChoice ? 'Сохраняем…' : 'Зафиксировать первый вариант'}</button>}
+                {firstChoice && <p className="fact" role="status">Первый вариант сохранён · {data.checks.find(({ id }) => id === firstChoice.checkId)?.label}.</p>}
+                <button type="button" className="button primary run-action" disabled={!actionReady || savingChoice} aria-disabled={busy || undefined} onClick={() => void launch()}>
                   {busy ? 'Запускаем проверку…' : failure ? 'Повторить проверку' : 'Запустить проверку'}
                   {busy ? <LoaderCircle size={18} className="spinner" /> : <ArrowRight size={19} />}
                 </button>
@@ -243,6 +279,7 @@ export function Workspace({ data, mode, chooseMode, revision }: {
                 <h2 id="stage-title" tabIndex={-1} ref={heading}>{stage === 2 || publication ? 'Результат проверки' : 'Предпросмотр'}</h2>
               </div>
               <Evidence key={run.id} run={run} animate={animateResult} anchorPrefix="result-evidence" />
+              <AttemptTrail run={run} openRule={openSource} />
               {stage === 2 && !publication && <Conclusion key={`${run.id}/${mode}`} run={run} value={conclusion} onChange={setConclusion} openRule={openSource} mode={mode} />}
               {stage === 3 && !publication && conclusion.trim() && <p className="record-conclusion"><strong>Твой вывод</strong>{conclusion}</p>}
               {stage === 3 && <details className="response-details">
@@ -256,7 +293,8 @@ export function Workspace({ data, mode, chooseMode, revision }: {
                     <button type="button" className="button primary" onClick={() => move(3)}>
                       {publication ? 'Открыть публикацию' : 'Опубликовать в задачу'} <ArrowRight size={19} />
                     </button>
-                    <button type="button" className="button secondary" onClick={() => move(1)}>Изменить ожидания</button>
+                    {data.attemptId ? <a className="button secondary" href={`/?task=${task.id}`}>Начать новую попытку</a>
+                      : <button type="button" className="button secondary" onClick={() => move(1)}>Изменить ожидания</button>}
                   </>
                 ) : (
                   <>
@@ -275,7 +313,7 @@ export function Workspace({ data, mode, chooseMode, revision }: {
                   </>
                 )}
               </div>
-              {stage === 3 && publication && !priceTask && <NextTask />}
+              {stage === 3 && publication && task.id === 'SEARCH-01' && <NextTask />}
               {publication && <p className="first-task-note">Запись сохранена. Открой её, чтобы увидеть решение наставника.</p>}
             </>
           )}

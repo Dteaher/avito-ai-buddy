@@ -1,5 +1,5 @@
 import { Check, ChevronDown, CircleAlert, Clock3, Terminal, X } from 'lucide-react';
-import { cities, type CheckResult, type PriceResult, type Run, type RunEvidenceSource } from '../shared/contracts';
+import { groupLabels, type CheckResult, type PriceResult, type Run, type RunEvidenceSource } from '../shared/contracts';
 import { PriceComparison, priceLabel } from './PriceOrder';
 import { responseFollowsRule } from '../shared/run-summary';
 
@@ -15,9 +15,10 @@ function RequestLine({ check }: { check: ResponseCheck }) {
 
 function Comparison({ check }: { check: CheckResult }) {
   const comparedCities = [...new Set([...check.expectedCities, ...check.actualCities])];
+  const inventory = check.id === 'all-statuses' || check.id === 'active-only';
   return (
     <>
-      <table className="city-comparison" aria-label="Сравнение городов">
+      <table className="city-comparison" aria-label={inventory ? 'Сравнение групп товаров' : 'Сравнение городов'}>
         <thead><tr><th scope="col">Ожидали</th><th scope="col">Стенд вернул</th></tr></thead>
         <tbody>
           {!comparedCities.length && <tr><td>Пустая выдача</td><td>Пустая выдача</td></tr>}
@@ -26,11 +27,11 @@ function Comparison({ check }: { check: CheckResult }) {
             const extra = check.extra.includes(city);
             return (
               <tr key={city}>
-                <td>{extra ? '—' : cities[city]}</td>
+                <td>{extra ? '—' : groupLabels[city]}</td>
                 <td className={missing || extra ? 'city-mismatch' : 'city-match'}>
                   <div className="city-value">
                     {missing || extra ? <CircleAlert size={18} /> : <Check size={18} />}
-                    <span>{cities[city]}{missing ? ' отсутствует' : extra ? ' — лишний город' : ''}</span>
+                    <span>{groupLabels[city]}{missing ? inventory ? ' отсутствуют' : ' отсутствует' : extra ? inventory ? ' — лишняя группа' : ' — лишний город' : ''}</span>
                   </div>
                 </td>
               </tr>
@@ -43,7 +44,7 @@ function Comparison({ check }: { check: CheckResult }) {
         <strong>{check.matches ? 'Совпало' : 'Найдено расхождение'}</strong>
       </div>
       {!check.followsRule && (
-        <p className="rule-warning"><CircleAlert size={18} /> По тестовой инструкции ожидаем {check.ruleCities.map((city) => cities[city]).join(' и ')}.</p>
+        <p className="rule-warning"><CircleAlert size={18} /> По тестовой инструкции ожидаем {check.ruleCities.map((city) => groupLabels[city]).join(' и ')}.</p>
       )}
     </>
   );
@@ -55,7 +56,7 @@ function ResponseBody({ check }: { check: ResponseCheck }) {
       <p>Параметр <code>{check.parameter}</code></p>
       {check.items.length ? (
         <ul className="listings">{check.items.map((item, index) => (
-          <li key={`${item.id}-${index}`}><strong>{item.title}</strong><span>{'price' in item ? priceLabel(item.price) : cities[item.city]} · <code>{item.id}</code></span></li>
+          <li key={`${item.id}-${index}`}><strong>{item.title}</strong><span>{'price' in item ? priceLabel(item.price) : groupLabels[item.city]} · <code>{item.id}</code></span></li>
         ))}</ul>
       ) : <p>Стенд вернул пустой список объявлений.</p>}
       <details className="raw"><summary>Сырое тело ответа <ChevronDown size={15} className="disclosure" /></summary><pre>{check.rawBody}</pre></details>

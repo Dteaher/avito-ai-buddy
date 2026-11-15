@@ -7,6 +7,8 @@ import { Evidence, RunContext, formatTime } from './Evidence';
 import { NextTask, Workspace } from './Workspace';
 import { Buddy, InstructionDialog, showInstruction } from './Buddy';
 import { Conclusion } from './Conclusion';
+import { AttemptTrail } from './AttemptTrail';
+import { CopyEvidence } from './CopyEvidence';
 
 type Loaded = { workspace: WorkspaceData; publication?: Publication; records?: RecordListItem[]; revision?: Publication };
 
@@ -94,7 +96,7 @@ export function App() {
     <>
       <Header identity={identity} />
       {data?.publication ? <Record publication={data.publication} workspace={data.workspace} mode={mode} />
-        : data?.records ? <RecordList records={data.records} mentor={identity?.role === 'mentor'} />
+        : data?.records ? <RecordList records={data.records} mentor={identity?.role === 'mentor'} offer={data.workspace.assignmentOffer} />
           : data ? <Workspace key={data.workspace.task.id} data={data.workspace} mode={mode} chooseMode={chooseMode} revision={data.revision} /> : (
         <main className="container initial">
           {error ? (
@@ -113,12 +115,37 @@ export function App() {
 
 const reviewLabel = { accepted: 'Результат принят', returned: 'Возвращено с комментарием' };
 
-function RecordList({ records, mentor }: { records: RecordListItem[]; mentor: boolean }) {
+function RecordList({ records, mentor, offer }: { records: RecordListItem[]; mentor: boolean; offer?: WorkspaceData['assignmentOffer'] }) {
+  const [assigned, setAssigned] = useState(offer?.assigned);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState('');
+  async function assign() {
+    if (!offer) return;
+    setPending(true);
+    setError('');
+    try {
+      await post('/api/assignments', { templateId: offer.id, traineeId: 'demo-trainee' });
+      setAssigned(true);
+    } catch (reason) {
+      setError(errorMessage(reason));
+    } finally {
+      setPending(false);
+    }
+  }
   return (
     <main className="container record-page">
       {!mentor && <a href="/" className="text-link back-link"><ArrowLeft size={17} /> К рабочему пространству</a>}
       <h1>{mentor ? 'Записи на ревью' : 'Мои записи'}</h1>
       {mentor && <p>Записи назначенного тебе стажёра А.</p>}
+      {mentor && offer && <section id="assignment-offer" className="surface record-surface assignment-offer" aria-labelledby="assignment-title">
+        <div><h2 id="assignment-title">Следующее поручение</h2><p>{offer.title}</p>
+          <p className="fact">Тестовое назначение · {offer.id} · правило v{offer.version}</p></div>
+        {assigned ? <p role="status"><strong>Назначено стажёру А</strong></p>
+          : <button type="button" className="button primary" disabled={pending} onClick={() => void assign()}>
+            {pending ? 'Назначаем…' : 'Назначить стажёру А'}
+          </button>}
+        {error && <p role="alert" className="action-error">{error}</p>}
+      </section>}
       <section className="surface record-surface record-list" aria-label="Опубликованные проверки">
         {records.length ? <ul>{records.map((record) => (
           <li key={record.id}>
@@ -205,7 +232,7 @@ function Record({ publication: initial, workspace, mode }: { publication: Public
   }
   return (
     <main className="container record-page">
-      <a href={mentor ? '/?records=1' : run.kind === 'price-order' ? '/?task=SORT-01' : '/'} className="text-link back-link"><ArrowLeft size={17} /> {mentor ? 'К записям на ревью' : 'К рабочему пространству'}</a>
+      <a href={mentor ? '/?records=1' : run.task.id === 'SEARCH-01' ? '/' : `/?task=${encodeURIComponent(run.task.id)}`} className="text-link back-link"><ArrowLeft size={17} /> {mentor ? 'К записям на ревью' : 'К рабочему пространству'}</a>
       <div className="record-hero">
         <span className="task-key">{run.task.id}</span>
         <h1>Запись проверки</h1>
@@ -222,6 +249,7 @@ function Record({ publication: initial, workspace, mode }: { publication: Public
           <section className="record-summary" aria-label="Резюме проверки">
             <h2>Что проверили</h2>
             <p>{task.description}</p>
+            <p className="fact">{task.id} · Правило v{task.instruction.version}</p>
             {run.preparation && <p className="record-conclusion"><strong>Вопрос стажёра</strong>{run.preparation.question}</p>}
             <p>Источник ожидания · {run.preparation ? 'на основе черновика Buddy' : 'ручной ввод'} по инструкции команды.</p>
             {summarizeRun(run).map((fact) => <p className="fact" key={fact}>{fact}</p>)}
@@ -233,7 +261,9 @@ function Record({ publication: initial, workspace, mode }: { publication: Public
               {previous.review?.comment && <p className="record-conclusion"><strong>Замечание наставника</strong>{previous.review.comment}</p>}
             </section>}
             {nextId && <a href={`/records/${nextId}`} className="text-link">Открыть исправленную версию <ArrowUpRight size={15} /></a>}
+            <CopyEvidence publication={publication} />
           </section>
+          <AttemptTrail run={run} openRule={(n) => showInstruction(instruction.current, n)} />
           <section className="record-summary" aria-label="Повтор проверки">
             {mentor ? <details className="response-details stand-switch">
               <summary>Демо-стенд · {fixed ? 'исправный ответ' : 'ответ с дефектом'}</summary>
@@ -280,11 +310,15 @@ function Record({ publication: initial, workspace, mode }: { publication: Public
           </section>
           <RunContext run={run} showRules />
           <Evidence run={run} anchorPrefix="result-evidence" />
-          {!mentor && run.kind !== 'price-order' && <NextTask />}
+          {!mentor && task.id === 'SEARCH-01' && <NextTask />}
+          {!mentor && task.id === 'SORT-01' && workspace.tasks.some(({ comparison }) => comparison) &&
+            <a className="text-link" href="/?task=ARCHIVE-01">Следующее поручение · архивные товары <ArrowUpRight size={15} /></a>}
         </section>
         <div className="record-sidebar">
           <section className="surface review-panel" aria-labelledby="review-title">
             <h2 id="review-title" tabIndex={-1}>Решение наставника</h2>
+            {mentor && workspace.assignmentOffer && !workspace.assignmentOffer.assigned &&
+              <a className="text-link" href="/?records=1#assignment-offer">Назначить следующее поручение <ArrowUpRight size={15} /></a>}
             {review ? <div role="status">
               <p><strong>{reviewLabel[review.decision]}</strong> · <time dateTime={review.reviewedAt}>{formatTime(review.reviewedAt)}</time></p>
               {review.comment && <p className="record-conclusion">{review.comment}</p>}

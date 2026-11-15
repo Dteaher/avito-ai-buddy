@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import type { DemoIdentityId, Publication, Run } from '../shared/contracts.ts';
+import type { AttemptChoice, DemoIdentityId, Publication, Run, Task } from '../shared/contracts.ts';
 
 export function createStore(path: string) {
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
@@ -33,6 +33,22 @@ export function createStore(path: string) {
     CREATE TABLE IF NOT EXISTS record_replays (
       record_id TEXT PRIMARY KEY REFERENCES records(id),
       run_id TEXT NOT NULL REFERENCES runs(id)
+    );
+    CREATE TABLE IF NOT EXISTS assignments (
+      task_id TEXT NOT NULL,
+      trainee TEXT NOT NULL,
+      mentor TEXT NOT NULL,
+      snapshot TEXT NOT NULL,
+      PRIMARY KEY(task_id, trainee)
+    );
+    CREATE TABLE IF NOT EXISTS attempts (
+      id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL,
+      trainee TEXT NOT NULL,
+      first TEXT,
+      help TEXT NOT NULL DEFAULT 'none',
+      state TEXT NOT NULL DEFAULT 'open',
+      FOREIGN KEY(task_id, trainee) REFERENCES assignments(task_id, trainee)
     );
   `);
   db.exec('PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE');
@@ -108,6 +124,18 @@ export function createStore(path: string) {
   const latestReplay = db.prepare(`
     SELECT snapshot, actor FROM record_replays JOIN runs ON runs.id = run_id WHERE record_id = ? AND owner = ?
   `);
+  const assign = db.prepare('INSERT OR IGNORE INTO assignments (task_id, trainee, mentor, snapshot) VALUES (?, ?, ?, ?)');
+  const assigned = db.prepare('SELECT snapshot FROM assignments WHERE task_id = ? AND trainee = ?');
+  const openAttempt = db.prepare('INSERT INTO attempts (id, task_id, trainee) VALUES (?, ?, ?)');
+  const attemptScope = 'id = ? AND task_id = ? AND trainee = ?';
+  const attemptById = db.prepare(`SELECT first, help, state FROM attempts WHERE ${attemptScope}`);
+  const writeFirst = db.prepare(`UPDATE attempts SET first = ? WHERE ${attemptScope} AND state = 'open' AND first IS NULL`);
+  const markHelp = db.prepare(`UPDATE attempts SET help = CASE WHEN first IS NULL THEN 'before-choice' ELSE 'after-choice' END
+    WHERE ${attemptScope} AND state = 'open' AND help = 'none'`);
+  const lockAttempt = db.prepare(`UPDATE attempts SET state = 'running' WHERE ${attemptScope} AND state = 'open'
+    RETURNING first, help`);
+  const releaseAttempt = db.prepare(`UPDATE attempts SET state = 'open' WHERE ${attemptScope} AND state = 'running'`);
+  const finishAttempt = db.prepare(`UPDATE attempts SET state = 'used' WHERE ${attemptScope} AND state = 'running'`);
 
   function read(row: ReturnType<typeof byId.get>): Publication | undefined {
     if (!row) return;
@@ -132,6 +160,47 @@ export function createStore(path: string) {
   }
 
   return {
+    assign(task: Task, trainee: DemoIdentityId, mentor: DemoIdentityId) {
+      return assign.run(task.id, trainee, mentor, JSON.stringify(task)).changes === 1;
+    },
+    assignment(taskId: string, trainee: DemoIdentityId): Task | undefined {
+      const row = assigned.get(taskId, trainee);
+      return row ? JSON.parse(String(row.snapshot)) as Task : undefined;
+    },
+    openAttempt(taskId: string, trainee: DemoIdentityId) {
+      const id = randomUUID();
+      openAttempt.run(id, taskId, trainee);
+      return id;
+    },
+    setFirstChoice(id: string, taskId: string, trainee: DemoIdentityId, choice: AttemptChoice) {
+      const snapshot = JSON.stringify(choice);
+      writeFirst.run(snapshot, id, taskId, trainee);
+      const row = attemptById.get(id, taskId, trainee);
+      return row?.state === 'open' && row.first === snapshot;
+    },
+    noteHelp(id: string, taskId: string, trainee: DemoIdentityId) {
+      markHelp.run(id, taskId, trainee);
+      return attemptById.get(id, taskId, trainee)?.state === 'open';
+    },
+    lockAttempt(id: string, taskId: string, trainee: DemoIdentityId) {
+      const row = lockAttempt.get(id, taskId, trainee);
+      return row ? { first: row.first ? JSON.parse(String(row.first)) as AttemptChoice : undefined,
+        help: row.help as NonNullable<Run['attempt']>['help'] } : undefined;
+    },
+    releaseAttempt(id: string, taskId: string, trainee: DemoIdentityId) {
+      releaseAttempt.run(id, taskId, trainee);
+    },
+    saveAttemptRun(id: string, run: Run, trainee: DemoIdentityId) {
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        insertRun.run(run.id, trainee, run.task.id, JSON.stringify(run));
+        finishAttempt.run(id, run.task.id, trainee);
+        db.exec('COMMIT');
+      } catch (error) {
+        db.exec('ROLLBACK');
+        throw error;
+      }
+    },
     saveRun(run: Run, owner: string) {
       insertRun.run(run.id, owner, run.task.id, JSON.stringify(run));
     },

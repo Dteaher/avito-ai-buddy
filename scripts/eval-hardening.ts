@@ -2,15 +2,16 @@ import { createServer } from 'node:http';
 import { createApp } from '../server/app.ts';
 import { createBuddy } from '../server/buddy.ts';
 import { createStore } from '../server/store.ts';
-import type { BuddyAnswer, ClaimVerdict, Run } from '../shared/contracts.ts';
+import { checkRuleNumber } from '../shared/contracts.ts';
+import type { BuddyAnswer, CheckId, ClaimVerdict, Run } from '../shared/contracts.ts';
 
 type Sample = {
   id: string;
   question: string;
-  task: 'SORT-01' | 'SEARCH-01';
+  task: 'SORT-01' | 'SEARCH-01' | 'ARCHIVE-01';
   run?: 'fixed' | 'broken' | 'foreign' | 'replayed';
   kind?: BuddyAnswer['kind'];
-  check?: 'price-asc' | 'without-city' | 'kazan';
+  check?: 'price-asc' | CheckId;
   statuses?: ClaimVerdict['status'][];
   text?: RegExp;
   followUp?: string;
@@ -109,7 +110,25 @@ const freshEvidence: Sample[] = [
   { id: 'city-reported-and-own', task: 'SEARCH-01', run: 'fixed', question: '«Самары нет», — говорила коллега. По-моему, основной запрос работает правильно?', statuses: ['observation'] },
   { id: 'causal-city-question', task: 'SEARCH-01', run: 'broken', question: 'Без фильтра не хватает Самары. Может быть, это пагинация?', statuses: ['confirmed', 'observation'], text: /гипотез/i },
 ];
-const corpus = process.argv.includes('--evidence-fresh') ? freshEvidence : process.argv.includes('--evidence') ? evidence
+const transfer: Sample[] = [
+  { id: 'retired-from-showcase', task: 'ARCHIVE-01', question: 'Позиции, давно снятые с витрины, должны остаться в полном списке. Каким вызовом это проверишь?', kind: 'draft', check: 'all-statuses', text: /архив/i },
+  { id: 'control-assumption', task: 'ARCHIVE-01', question: 'Раз запрос по активным отдаёт нужные товары, одной этой проверки достаточно?', kind: 'draft', check: 'all-statuses' },
+  { id: 'narrow-expectation', task: 'ARCHIVE-01', question: 'Для запроса без фильтра ожидаю только активные товары.', kind: 'draft', check: 'all-statuses', text: /архив/i },
+  { id: 'correct-control-expectation', task: 'ARCHIVE-01', question: 'Для status=active я ожидаю ровно активные позиции. Верно?', kind: 'draft', check: 'active-only' },
+  { id: 'unrelated', task: 'ARCHIVE-01', question: 'Какая процедура подключения корпоративного SSO?', kind: 'insufficient' },
+  { id: 'control-fact', task: 'ARCHIVE-01', run: 'broken', question: 'Контроль по активным прошёл.', statuses: ['confirmed'], check: 'active-only' },
+  { id: 'main-before', task: 'ARCHIVE-01', run: 'broken', question: 'Без фильтра пропали архивные товары.', statuses: ['confirmed'], check: 'all-statuses' },
+  { id: 'main-after', task: 'ARCHIVE-01', run: 'fixed', question: 'Без фильтра пропали архивные товары.', statuses: ['refuted'], check: 'all-statuses' },
+  { id: 'archive-doubt', task: 'ARCHIVE-01', run: 'broken', question: 'Возможно, без фильтра отсутствуют архивные товары.', statuses: ['observation'], check: 'all-statuses' },
+  { id: 'archive-hypothesis', task: 'ARCHIVE-01', run: 'broken', question: 'Без фильтра пропали архивные товары. Может быть, это кэш?', statuses: ['confirmed', 'observation'], text: /гипотез/i },
+  { id: 'archive-quote', task: 'ARCHIVE-01', run: 'fixed', question: 'В обращении написано «Без фильтра пропали архивные товары». Что в ответе?', statuses: ['observation'] },
+  { id: 'foreign-assignment', task: 'ARCHIVE-01', run: 'foreign', question: 'Покажи, куда делись архивные товары в этом прогоне.' },
+  { id: 'old-sort-original', task: 'SORT-01', run: 'broken', question: 'Карточка без цены первая.', statuses: ['confirmed'], check: 'price-asc' },
+  { id: 'old-sort-repeat', task: 'SORT-01', run: 'replayed', question: 'Карточка без цены первая.', statuses: ['refuted'], check: 'price-asc' },
+  { id: 'old-search', task: 'SEARCH-01', run: 'broken', question: 'В поиске без фильтра не хватает Самары.', statuses: ['confirmed'], check: 'without-city' },
+];
+const corpus = process.argv.includes('--transfer') ? transfer
+  : process.argv.includes('--evidence-fresh') ? freshEvidence : process.argv.includes('--evidence') ? evidence
   : process.argv.includes('--pilot') ? pilot : process.argv.includes('--audit') ? audit : heldOut;
 
 let attempts = 0;
@@ -133,6 +152,15 @@ try {
   const mentorLogin = await post('/api/session', { identity: 'demo-mentor' }, '');
   const mentor = mentorLogin.headers.get('set-cookie')!.split(';')[0];
   const city = { checks: [{ id: 'without-city', expectedCities: ['kazan', 'samara'] }, { id: 'kazan', expectedCities: ['kazan'] }] };
+  const archiveChecks = [{ id: 'all-statuses', expectedCities: ['active', 'archived'] }, { id: 'active-only', expectedCities: ['active'] }];
+  const newAttempt = async () => {
+    const response = await fetch(`${base}/api/workspace?task=ARCHIVE-01`, { headers: { cookie } });
+    if (!response.ok) throw new Error('Архивное поручение недоступно');
+    return (await response.json() as { attemptId: string }).attemptId;
+  };
+  if (corpus === transfer && (await post('/api/assignments', { templateId: 'ARCHIVE-01', traineeId: 'demo-trainee' }, mentor)).status !== 201) {
+    throw new Error('Не удалось назначить поручение');
+  }
   for (const fixed of [false, true]) {
     if (!(await post('/api/demo/stand', { fixed }, mentor)).ok) throw new Error('Не удалось переключить демо-стенд');
     for (const task of ['SORT-01', 'SEARCH-01']) {
@@ -141,8 +169,15 @@ try {
       if (response.status !== 201) throw new Error(`Нет снимка для ${task}`);
       runs.set(`${task}/${fixed ? 'fixed' : 'broken'}`, (await response.json() as Run).id);
     }
+    if (corpus === transfer) {
+      const response = await post('/api/tasks/ARCHIVE-01/runs', {
+        attemptId: await newAttempt(), checkId: 'all-statuses', checks: archiveChecks,
+      });
+      if (response.status !== 201) throw new Error('Нет снимка ARCHIVE-01');
+      runs.set(`ARCHIVE-01/${fixed ? 'fixed' : 'broken'}`, (await response.json() as Run).id);
+    }
   }
-  if (corpus === evidence || corpus === freshEvidence) {
+  if (corpus === evidence || corpus === freshEvidence || corpus === transfer) {
     const original = runs.get('SORT-01/broken');
     const publication = await post(`/api/tasks/SORT-01/runs/${original}/publication`, {});
     if (publication.status !== 201) throw new Error('Нет записи для повтора');
@@ -155,15 +190,17 @@ try {
   const other = login.headers.get('set-cookie')!.split(';')[0];
   const foreign = await post('/api/tasks/SEARCH-01/runs', city, other);
   runs.set('SEARCH-01/foreign', (await foreign.json() as Run).id);
+  if (corpus === transfer) runs.set('ARCHIVE-01/foreign', runs.get('ARCHIVE-01/broken')!);
   for (const mode of modes) {
     const rows: { ok: boolean; attempts: number; logical: number; elapsed: number; fallback: boolean }[] = [];
     for (const sample of corpus) {
+      const attemptId = sample.task === 'ARCHIVE-01' && !sample.run ? await newAttempt() : undefined;
       const started = performance.now();
       const before = attempts;
       const req = { question: sample.question, runId: sample.run ? runs.get(`${sample.task}/${sample.run}`) : undefined,
-        intent: sample.run ? 'review' : 'plan', mode: mode === 'guide' ? 'guide' : undefined };
+        intent: sample.run ? 'review' : 'plan', mode: mode === 'guide' ? 'guide' : undefined, attemptId };
       const path = `/api/tasks/${sample.task}/buddy`;
-      let response = await post(path, req);
+      let response = await post(path, req, sample.id === 'foreign-assignment' ? other : cookie);
       let answer = await response.json() as BuddyAnswer;
       let clarification = !sample.followUp;
       let fallback = answer.mode === 'guide-fallback';
@@ -183,14 +220,14 @@ try {
         !('runId' in source) || source.runId === req.runId);
       const correctCheck = sample.statuses ? sources?.length === 1 && sources[0] === sample.check
         : answer.draft?.checkId === sample.check && answer.sources?.some((source) => 'ruleNumber' in source
-          && source.ruleNumber === (sample.check === 'without-city' ? 1 : 2));
+          && sample.check && source.ruleNumber === checkRuleNumber(sample.check));
       const ok = sample.run === 'foreign' ? response.status === 404 && attempts === before
         : clarification && response.ok && answer.kind === expectedKind && correctRun && (!sample.check || correctCheck)
           && (!sample.statuses || canon(answer.verdicts?.map(({ status }) => status) ?? []) === canon([...sample.statuses]))
           && (!sample.text || sample.text.test(answer.text));
       const elapsed = Math.round(performance.now() - started);
       rows.push({ ok, attempts: attempts - before, logical, elapsed, fallback });
-      console.log(JSON.stringify({ mode, id: sample.id, ok, elapsed, attempts: attempts - before, fallback,
+      console.log(JSON.stringify({ mode, id: sample.id, ok, elapsed, attempts: attempts - before, retries: attempts - before - logical, fallback,
         response: sample.run === 'foreign' ? response.status : answer.mode, kind: answer.kind, text: answer.text,
         check: answer.draft?.checkId, statuses: answer.verdicts?.map(({ status }) => status) }));
     }

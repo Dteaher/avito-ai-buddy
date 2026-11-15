@@ -35,11 +35,15 @@ export function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function isCity(value: unknown): value is City {
-  return typeof value === 'string' && Object.hasOwn(cities, value);
+export function setPlan(current: Task = task) {
+  return current.comparison ?? {
+    field: 'city' as const, values: Object.keys(cities) as City[],
+    checks: checks.map((check) => ({ ...check, required: ruleCities[check.id] })),
+  };
 }
 
-export function parseChecks(body: unknown): CheckInput[] | undefined {
+export function parseChecks(body: unknown, current: Task = task): CheckInput[] | undefined {
+  const { checks, values } = setPlan(current);
   if (!isObject(body) || Object.keys(body).length !== 1 || !Array.isArray(body.checks) || body.checks.length !== checks.length) return;
   const selections: CheckInput[] = [];
 
@@ -47,24 +51,20 @@ export function parseChecks(body: unknown): CheckInput[] | undefined {
     const input = body.checks.find((candidate: unknown) => isObject(candidate) && candidate.id === check.id);
     if (!isObject(input) || Object.keys(input).length !== 2) return;
     const selected: unknown = input.expectedCities;
-    if (!Array.isArray(selected) || !selected.every(isCity) || new Set(selected).size !== selected.length) return;
-    selections.push({ id: check.id, expectedCities: (Object.keys(cities) as City[]).filter((city) => selected.includes(city)) });
+    if (!Array.isArray(selected) || selected.some((value) => !values.includes(value)) || new Set(selected).size !== selected.length) return;
+    selections.push({ id: check.id, expectedCities: values.filter((value) => selected.includes(value)) });
   }
 
   return selections;
 }
 
-function isListing(value: unknown): value is Listing {
-  return isObject(value) && typeof value.id === 'string' && typeof value.title === 'string' && isCity(value.city);
-}
-
 export const ruleCities = {
   'without-city': [...new Set(listings.map(({ city }) => city))],
   kazan: ['kazan'],
-} satisfies Record<CheckInput['id'], City[]>;
+} satisfies Record<(typeof checks)[number]['id'], City[]>;
 
-export async function fetchStand(origin: string, path: string, signal: AbortSignal) {
-  const response = await fetch(new URL(path, origin), { signal, redirect: 'error' });
+export async function fetchStand(origin: string, path: string, signal: AbortSignal, headers?: HeadersInit) {
+  const response = await fetch(new URL(path, origin), { signal, headers, redirect: 'error' });
   const rawBody = await response.text();
   if (!response.ok) throw new Error(`Stand returned ${response.status}`);
   const data: unknown = JSON.parse(rawBody);
@@ -77,13 +77,17 @@ export async function fetchStand(origin: string, path: string, signal: AbortSign
   return { items, rawBody, status: response.status, standMode };
 }
 
-async function checkResponse(origin: string, input: CheckInput, signal: AbortSignal): Promise<CheckResult> {
-  const check = checks.find(({ id }) => id === input.id)!;
-  const { items, rawBody, status, standMode } = await fetchStand(origin, check.path, signal);
-  if (!items.every(isListing)) throw new Error('Invalid city listings');
+async function checkResponse(origin: string, input: CheckInput, signal: AbortSignal, current: Task, headers?: HeadersInit): Promise<CheckResult> {
+  const plan = setPlan(current);
+  const { required, ...check } = plan.checks.find(({ id }) => id === input.id)!;
+  const { items: rawItems, rawBody, status, standMode } = await fetchStand(origin, check.path, signal, headers);
+  const items: Listing[] = rawItems.map((item) => {
+    if (!isObject(item) || typeof item.id !== 'string' || typeof item.title !== 'string'
+      || !plan.values.includes(item[plan.field] as City)) throw new Error('Invalid listing group');
+    return { id: item.id, title: item.title, city: item[plan.field] as City };
+  });
   const actualCities = [...new Set(items.map(({ city }) => city))];
   const expectedCities = [...input.expectedCities];
-  const required: City[] = ruleCities[input.id];
   const missing = expectedCities.filter((city) => !actualCities.includes(city));
   const extra = actualCities.filter((city) => !expectedCities.includes(city));
   return {
@@ -93,8 +97,8 @@ async function checkResponse(origin: string, input: CheckInput, signal: AbortSig
   };
 }
 
-export async function executeRun(origin: string, inputs: CheckInput[]): Promise<CityRun> {
+export async function executeRun(origin: string, inputs: CheckInput[], current = task, headers?: HeadersInit): Promise<CityRun> {
   const signal = AbortSignal.timeout(5000);
-  const results = await Promise.all(inputs.map((input) => checkResponse(origin, input, signal)));
-  return { id: randomUUID(), task, checks: results, checkedAt: new Date().toISOString() };
+  const results = await Promise.all(inputs.map((input) => checkResponse(origin, input, signal, current, headers)));
+  return { id: randomUUID(), task: current, checks: results, checkedAt: new Date().toISOString() };
 }
