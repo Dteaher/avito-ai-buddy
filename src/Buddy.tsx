@@ -113,7 +113,7 @@ export function Buddy({ workspace, openSource, run, collapsible = false, intent,
       <div className="buddy-body" id={bodyId}>
         {run && (
           <div className="buddy-context">
-            <button className="text-link" type="button" disabled={pending} onClick={() => void ask(run.kind === 'price-order'
+            <button className="text-link" type="button" disabled={pending} onClick={() => void ask(run.kind === 'price-order' || run.task.authoringId
               ? 'Что показал прогон?' : 'Что вернул каждый из двух запросов в моём прогоне и где расхождение?', true)}>Разобрать результат <ArrowUpRight size={14} /></button>
           </div>
         )}
@@ -122,11 +122,12 @@ export function Buddy({ workspace, openSource, run, collapsible = false, intent,
             <div className="welcome">
               <p className="bubble assistant">{workspace.kind === 'price-order'
                 ? 'Попробуй задать порядок по инструкции. Если сомневаешься, спроси меня.'
-                : task.comparison ? run ? 'Спроси, какой факт из сохранённого ответа подтверждает вывод.'
+                : task.comparison ? run ? 'Спроси, какой факт в сохранённом ответе подтверждает вывод.'
                   : 'Можно сначала сохранить свой вариант. Если понадобится подсказка, напиши, что хочешь проверить.'
                   : 'Помогу разобраться в задаче и сверить ожидания с правилами команды. С чего начнём?'}</p>
               <div className="suggestions">
-                {(workspace.kind === 'price-order' ? priceSuggestions : task.comparison ? (run ? [] : ['Как выбрать запрос для этого поручения?']) : suggestions).map((question) => (
+                {(run?.task.authoringId ? [] : workspace.kind === 'price-order' ? priceSuggestions : task.comparison ? [task.authoringId ? 'Как выбрать запрос для поручения?' : task.comparison.checks[0].id === 'active-only'
+                  ? 'Достаточно проверить общую выдачу?' : 'Достаточно проверить активные товары?'] : suggestions).map((question) => (
                   <button key={question} type="button" onClick={() => void ask(question, true)}>{question}<ArrowUpRight size={15} /></button>
                 ))}
               </div>
@@ -146,9 +147,10 @@ export function Buddy({ workspace, openSource, run, collapsible = false, intent,
                   ? check.expectedOrder.map((id) => {
                     const item = orderItems?.find((entry) => entry.id === id);
                     return item?.price == null ? 'без цены' : `${item.price} ₽`;
-                  }).join(' → ') : check.expectedCities.map((city) => groupLabels[city]).join(' · '))}</p>
+                  }).join(' → ') : [check.expectedCities.map((city) => groupLabels[city]).join(' · ') || 'Пустая выдача',
+                    check.expectedUniqueIds === true && 'Уникальные ID'].filter(Boolean).join(' · '))}</p>
                 {answer.draft.checks.filter(({ id }) => id !== answer.draft?.checkId).map((check) => 'expectedCities' in check &&
-                  <p key={check.id}>{check.id === 'kazan' || check.id === 'active-only' ? 'С фильтром' : 'Без фильтра'} · {check.expectedCities.map((city) => groupLabels[city]).join(' · ')}</p>)}
+                  <p key={check.id}>{task.comparison?.checks.find(({ id }) => id === check.id)?.label ?? (check.id === 'kazan' ? 'С фильтром' : 'Без фильтра')} · {check.expectedCities.map((city) => groupLabels[city]).join(' · ')}{check.expectedUniqueIds && ' · Уникальные ID'}</p>)}
                 {onDraft && mode === answerMode && !run && <button type="button" className="button secondary"
                   onClick={() => { setExpanded(false); onDraft(answer.draft!, question); }}>Использовать черновик</button>}
               </div>}

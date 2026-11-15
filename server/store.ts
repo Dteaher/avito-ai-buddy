@@ -1,3 +1,4 @@
+import { createAuthoringStore } from './task-store.ts';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -108,7 +109,8 @@ export function createStore(path: string) {
     UPDATE records SET tracker_status = ?, tracker_id = ? WHERE id = ? AND tracker_status = 'pending'
   `);
   const byOwner = db.prepare(`
-    SELECT records.id, task_id, published_at, decision, previous_id,
+    SELECT records.id, task_id, published_at, decision, previous_id, tracker_status,
+      json_extract(snapshot, '$.task.title') AS title,
       (SELECT next.id FROM records AS next WHERE next.previous_id = records.id) AS next_id
     FROM records
     JOIN runs ON runs.id = run_id LEFT JOIN reviews ON record_id = records.id
@@ -132,6 +134,7 @@ export function createStore(path: string) {
   `);
   const assign = db.prepare('INSERT OR IGNORE INTO assignments (task_id, trainee, mentor, snapshot) VALUES (?, ?, ?, ?)');
   const assigned = db.prepare('SELECT snapshot FROM assignments WHERE task_id = ? AND trainee = ?');
+  const assignedTo = db.prepare('SELECT snapshot FROM assignments WHERE trainee = ? ORDER BY rowid DESC');
   const openAttempt = db.prepare('INSERT INTO attempts (id, task_id, trainee) VALUES (?, ?, ?)');
   const attemptScope = 'id = ? AND task_id = ? AND trainee = ?';
   const attemptById = db.prepare(`SELECT first, help, state FROM attempts WHERE ${attemptScope}`);
@@ -170,6 +173,10 @@ export function createStore(path: string) {
   }
 
   return {
+    authoring: createAuthoringStore(db),
+    assignments(trainee: DemoIdentityId) {
+      return assignedTo.all(trainee).map((row) => JSON.parse(String(row.snapshot)) as Task);
+    },
     assign(task: Task, trainee: DemoIdentityId, mentor: DemoIdentityId) {
       return assign.run(task.id, trainee, mentor, JSON.stringify(task)).changes === 1;
     },
@@ -256,6 +263,7 @@ export function createStore(path: string) {
       return byOwner.all(owner).map((row) => ({
         id: row.id, taskId: row.task_id, publishedAt: row.published_at, decision: row.decision,
         previousId: row.previous_id || undefined, nextId: row.next_id || undefined,
+        trackerStatus: row.tracker_status || undefined, title: row.title || undefined,
       }));
     },
     reviewRecord(id: string, owner: string, decision: 'accepted' | 'returned', comment: string) {

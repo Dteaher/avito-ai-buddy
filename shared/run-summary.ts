@@ -36,10 +36,20 @@ export function explainPriceRule(facts: ReturnType<typeof priceObservations>) {
     ].filter(Boolean).join(' ')}`;
 }
 
+export function repeatedIds(items: { id: string }[]) {
+  const seen = new Set<string>();
+  const repeated = new Set<string>();
+  for (const { id } of items) {
+    if (seen.has(id)) repeated.add(id);
+    seen.add(id);
+  }
+  return [...repeated].sort();
+}
+
 export function sameObservedResult(first: Run, second: Run) {
   const observed = (run: Run) => run.checks.map((check) => 'actualOrder' in check
     ? [check.id, check.status, check.items.map(({ id, price }) => [id, price])]
-    : [check.id, check.status, [...check.actualCities].sort()]);
+    : [check.id, check.status, [...check.actualCities].sort(), check.uniqueIds ? repeatedIds(check.items) : undefined]);
   return JSON.stringify(observed(first)) === JSON.stringify(observed(second));
 }
 
@@ -54,6 +64,7 @@ export function standLabel(run: Run) {
 export function responseFollowsRule(check: Run['checks'][number]) {
   return 'ruleCities' in check
     ? check.actualCities.length === check.ruleCities.length && check.ruleCities.every((city) => check.actualCities.includes(city))
+      && (!check.uniqueIds || repeatedIds(check.items).length === 0)
     : priceObservations(check).followsRule;
 }
 
@@ -69,7 +80,9 @@ export function summarizeRun(run: Run) {
         missing.length && `Отсутствуют ${groups}: ${list(missing)}.`,
         extra.length && `Лишние ${groups}: ${list(extra)}.`,
       ].filter(Boolean).join(' ');
-      return `${request} По правилу: ${list(check.ruleCities)}. Стенд вернул: ${list(check.actualCities)}. ${differences || 'Состав соответствует правилу.'}`;
+      const repeated = check.uniqueIds ? repeatedIds(check.items) : undefined;
+      const uniqueness = repeated ? repeated.length ? ` Повторяющиеся ID: ${repeated.join(', ')}.` : ' Все ID уникальны.' : '';
+      return `${request} По правилу: ${list(check.ruleCities)}. Стенд вернул: ${list(check.actualCities)}. ${differences || (check.uniqueIds ? 'Группы соответствуют правилу.' : 'Состав соответствует правилу.')}${uniqueness}`;
     }
     const labels = (ids: string[], items: typeof check.fixtures) => ids.slice(0, 12).map((id) => {
       const item = items.find((entry) => entry.id === id);

@@ -1,9 +1,10 @@
 export const cities = { kazan: 'Казань', samara: 'Самара' } as const;
 export const groupLabels = { ...cities, active: 'Активные', archived: 'Архивные' } as const;
 export type City = keyof typeof groupLabels;
-export type CheckId = 'without-city' | 'kazan' | 'all-statuses' | 'active-only';
+export type CheckId = 'without-city' | 'kazan' | 'all-statuses' | 'active-only' | 'reindex-active';
 
-export function checkRuleNumber(id: CheckId | 'price-asc') {
+export function checkRuleNumber(id: CheckId | 'price-asc', task?: Task) {
+  if (task?.authoringId) return (task.comparison?.checks.findIndex((check) => check.id === id) ?? -1) + 1;
   return id === 'without-city' || id === 'all-statuses' ? 1 : 2;
 }
 
@@ -19,13 +20,14 @@ export interface Task {
   id: string;
   title: string;
   shortTitle?: string;
+  authoringId?: string;
   description: string;
   criterion: string;
   instruction: Instruction;
   comparison?: {
     field: 'status';
     values: City[];
-    checks: [Check & { required: City[] }, Check & { required: City[] }];
+    checks: [CatalogCheck, ...CatalogCheck[]];
   };
 }
 
@@ -37,6 +39,42 @@ interface RequestDefinition {
 
 export interface Check extends RequestDefinition {
   id: CheckId;
+  uniqueIds?: true;
+}
+
+export interface CatalogCheck extends Check {
+  required: City[];
+}
+
+export interface TaskDraftInput {
+  title: string;
+  description: string;
+  criterion: string;
+  checkIds: CheckId[];
+}
+
+export interface TaskDraft {
+  input: TaskDraftInput;
+  revision: string;
+}
+
+export interface TaskVersion {
+  version: number;
+  task: Task;
+  input: TaskDraftInput;
+  assigned: boolean;
+}
+
+export interface TaskProject {
+  id: string;
+  draft?: TaskDraft;
+  versions: TaskVersion[];
+}
+
+export interface TaskEditorData {
+  catalog: CatalogCheck[];
+  projects: TaskProject[];
+  trainees: DemoIdentity[];
 }
 
 export interface PriceCheck extends RequestDefinition {
@@ -51,12 +89,16 @@ interface WorkspaceBase {
   identity?: DemoIdentity;
   standFixed?: boolean;
   attemptId?: string;
-  assignmentCatalog?: AssignmentCatalog;
+  assignmentOffers?: AssignmentOffer[];
 }
 
-export interface AssignmentCatalog {
+export interface AssignmentOffer {
+  id: string;
+  title: string;
+  criterion: string;
+  version: string;
+  assignedVersion?: string;
   traineeId: DemoIdentityId;
-  offers: { id: string; title: string; criterion: string; version: string; assignedVersion?: string }[];
 }
 
 export type DemoIdentityId = 'demo-trainee' | 'demo-trainee-b' | 'demo-mentor';
@@ -74,6 +116,7 @@ export type Workspace = WorkspaceBase & (
 export interface CheckInput {
   id: CheckId;
   expectedCities: City[];
+  expectedUniqueIds?: boolean;
 }
 
 export interface Listing {
@@ -102,6 +145,7 @@ export interface CheckResult extends Check, CheckInput, ResponseSnapshot {
   ruleCities: City[];
   missing: City[];
   extra: City[];
+  duplicateIds?: string[];
 }
 
 export interface PriceResult extends PriceCheck, ResponseSnapshot {
@@ -158,6 +202,8 @@ export interface RecordListItem {
   taskId: string;
   publishedAt: string;
   decision: 'accepted' | 'returned' | null;
+  trackerStatus?: TrackerDelivery['status'];
+  title?: string;
   previousId?: string;
   nextId?: string;
 }

@@ -23,7 +23,7 @@ export class ModelResponseError extends Error {}
 
 export interface WorkflowReply {
   intent: 'plan' | 'review';
-  checks: { id: DraftCheck['id']; expected: string[] }[];
+  checks: { id: DraftCheck['id']; expected: string[]; ruleNumber?: number }[];
   hint: string;
   claims?: readonly string[];
   clarificationRequired?: boolean;
@@ -80,7 +80,7 @@ function decode(content: unknown, evidence: Map<string, EvidenceEntry>, plan?: R
     if (kind === 'draft') {
       if (!selected || expected.length !== selected.expected.length
         || !selected.expected.every((item, index) => item === expected[index])) throw new ModelResponseError();
-      const ruleId = `rule:${checkRuleNumber(selected.id)}`;
+      const ruleId = `rule:${selected.ruleNumber ?? checkRuleNumber(selected.id)}`;
       const rule = evidence.get(ruleId)!.source;
       if (!cited.includes(ruleId)) resolved.unshift(rule);
     } else if (checkId !== '' || expected.length) throw new ModelResponseError();
@@ -167,9 +167,11 @@ export async function generateReply(provider: NonNullable<ReturnType<typeof read
 
   const timeout = AbortSignal.timeout(provider.timeout);
   const signal = options.signal ? AbortSignal.any([timeout, options.signal]) : timeout;
+  const soleDraft = workflow?.draftRequired && workflow.checks.length === 1 ? workflow.checks[0] : undefined;
   const draftFields = workflow?.intent === 'plan' ? {
-    checkId: { type: 'string', enum: ['', ...(workflow.clarificationRequired ? [] : workflow.checks.map(({ id }) => id))] },
-    expected: { type: 'array', maxItems: workflow.clarificationRequired ? 0 : 3,
+    checkId: { type: 'string', enum: soleDraft ? [soleDraft.id] : ['', ...(workflow.clarificationRequired ? [] : workflow.checks.map(({ id }) => id))] },
+    expected: { type: 'array', ...(soleDraft ? { minItems: soleDraft.expected.length, maxItems: soleDraft.expected.length }
+      : { maxItems: workflow.clarificationRequired ? 0 : 3 }),
       items: { type: 'string', enum: [...new Set(workflow.checks.flatMap(({ expected }) => expected))] } },
   } : workflow?.intent === 'review' ? {
     claims: { type: 'array', items: { type: 'string', enum: workflow.claims } },

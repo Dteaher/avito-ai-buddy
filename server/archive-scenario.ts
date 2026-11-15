@@ -40,8 +40,8 @@ export const activeFilterTask: Task = {
   comparison: {
     field: 'status', values: ['active', 'archived'],
     checks: [
-      { id: 'active-only', label: 'По активным', path: '/demo/inventory/filter-check?status=active', parameter: 'status=active', required: ['active'] },
-      { id: 'all-statuses', label: 'Без фильтра', path: '/demo/inventory/filter-check', parameter: 'Без фильтра', required: ['active', 'archived'] },
+      { id: 'active-only', label: 'По активным', path: '/demo/inventory/audit?status=active', parameter: 'status=active', required: ['active'] },
+      { id: 'all-statuses', label: 'Без фильтра', path: '/demo/inventory/audit', parameter: 'Без фильтра', required: ['active', 'archived'] },
     ],
   },
 };

@@ -15,7 +15,7 @@ function RequestLine({ check }: { check: ResponseCheck }) {
 
 function Comparison({ check }: { check: CheckResult }) {
   const comparedCities = [...new Set([...check.expectedCities, ...check.actualCities])];
-  const inventory = check.id === 'all-statuses' || check.id === 'active-only';
+  const inventory = check.id !== 'without-city' && check.id !== 'kazan';
   return (
     <>
       <table className="city-comparison" aria-label={inventory ? 'Сравнение групп товаров' : 'Сравнение городов'}>
@@ -39,12 +39,16 @@ function Comparison({ check }: { check: CheckResult }) {
           })}
         </tbody>
       </table>
+      {check.uniqueIds && <p className="fact" aria-label="Сравнение ID">
+        <strong>Ожидание по ID</strong> · {check.expectedUniqueIds ? 'Все ID уникальны.' : 'Есть повторяющиеся ID.'}
+        {' '}<strong>Фактически</strong> · {check.duplicateIds?.length ? `Повторяющиеся ID: ${check.duplicateIds.join(', ')}.` : 'Все ID уникальны.'}
+      </p>}
       <div className={`comparison-verdict ${check.matches ? 'ok' : 'bad'}`}>
         {check.matches ? <Check size={20} /> : <CircleAlert size={20} />}
         <strong>{check.matches ? 'Совпало' : 'Найдено расхождение'}</strong>
       </div>
       {!check.followsRule && (
-        <p className="rule-warning"><CircleAlert size={18} /> По тестовой инструкции ожидаем {check.ruleCities.map((city) => groupLabels[city]).join(' и ')}.</p>
+        <p className="rule-warning"><CircleAlert size={18} /> По тестовой инструкции ожидаем {check.ruleCities.map((city) => groupLabels[city]).join(' и ')}.{check.uniqueIds ? ' ID должны быть уникальны.' : ''}</p>
       )}
     </>
   );
@@ -73,19 +77,19 @@ function ResponseDetails({ check }: { check: ResponseCheck }) {
   );
 }
 
-function RuleDifference({ check }: { check: ResponseCheck }) {
+function RuleDifference({ check, showAlways = false }: { check: ResponseCheck; showAlways?: boolean }) {
   const follows = responseFollowsRule(check);
-  return check.matches === follows ? null : (
+  return !showAlways && check.matches === follows ? null : (
     <p className="fact"><strong>Ответ по правилу</strong> · {follows ? 'соответствует инструкции' : 'расходится с инструкцией'}.</p>
   );
 }
 
-function CityEvidence({ check, label = check.label, anchor }: { check: CheckResult; label?: string; anchor?: string }) {
+function CityEvidence({ check, label = check.label, anchor, showRule }: { check: CheckResult; label?: string; anchor?: string; showRule?: boolean }) {
   return (
     <section id={anchor} aria-label={label}>
       <div className="request-heading"><RequestLine check={check} /><span className="http-status">HTTP {check.status}</span></div>
       <Comparison check={check} />
-      <RuleDifference check={check} />
+      <RuleDifference check={check} showAlways={showRule} />
       <ResponseDetails check={check} />
     </section>
   );
@@ -105,12 +109,15 @@ export function Evidence({ run, animate = false, checkId, anchorPrefix }: {
       </section>
     );
   }
-  const [primary, control] = run.checks;
-  if (checkId) return <div className="evidence"><CityEvidence check={checkId === control.id ? control : primary} /></div>;
+  const [primary, ...controls] = run.checks;
+  if (checkId) {
+    const check = run.checks.find(({ id }) => id === checkId);
+    return check ? <div className="evidence"><CityEvidence check={check} showRule={Boolean(run.task.authoringId)} /></div> : null;
+  }
   return (
     <div className={`evidence${animate ? ' reveal' : ''}`}>
-      <CityEvidence check={primary} label="Основной запрос" anchor={anchor(primary.id)} />
-      <details id={anchor(control.id)} className="control-details">
+      <CityEvidence check={primary} label="Основной запрос" anchor={anchor(primary.id)} showRule={Boolean(run.task.authoringId)} />
+      {controls.map((control) => <details id={anchor(control.id)} key={control.id} className="control-details">
         <summary>
           <span className="control-label"><strong>Контрольный запрос</strong><span>{control.label}</span></span>
           <span className={`verdict-chip ${control.matches ? 'ok' : 'bad'}`}>
@@ -121,10 +128,10 @@ export function Evidence({ run, animate = false, checkId, anchorPrefix }: {
         <div className="control-body">
           <div className="request-heading"><RequestLine check={control} /><span className="http-status">HTTP {control.status}</span></div>
           <Comparison check={control} />
-          <RuleDifference check={control} />
+          <RuleDifference check={control} showAlways={Boolean(run.task.authoringId)} />
           <ResponseBody check={control} />
         </div>
-      </details>
+      </details>)}
     </div>
   );
 }

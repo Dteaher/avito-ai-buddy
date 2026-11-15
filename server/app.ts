@@ -9,8 +9,10 @@ import type { createStore } from './store.ts';
 import { assignedTrainee, findIdentity, identities } from './demo-identities.ts';
 import { inventoryTasks, products } from './archive-scenario.ts';
 import type { SendToTracker } from './tracker.ts';
+import { registerAuthoring } from './task-editor.ts';
 
 const demoTasks = [task, sortTask];
+const indexedProducts = [{ id: 'sku-401', title: 'Чехол', status: 'active' }, { id: 'sku-402', title: 'Кабель', status: 'active' }];
 
 function attemptChoice(checks: CheckInput[], id: unknown): AttemptChoice | undefined {
   const selected = checks.find((check) => check.id === id);
@@ -87,7 +89,7 @@ export function createApp({ store, standOrigin, buddy, tracker, staticDir }: App
     res.json({ items: standFixed && !filters.length ? listings : listings.filter(({ city }) => city === 'kazan') });
   });
 
-  app.get(['/demo/inventory', '/demo/inventory/filter-check'], (req, res) => {
+  app.get(['/demo/inventory', '/demo/inventory/audit', '/demo/inventory/filter-check'], (req, res) => {
     if (req.get('X-Demo-Inventory-Key') !== inventoryHeaders['X-Demo-Inventory-Key']) {
       res.sendStatus(404);
       return;
@@ -99,9 +101,23 @@ export function createApp({ store, standOrigin, buddy, tracker, staticDir }: App
     }
     res.set('X-Avito-Demo-Stand', standFixed ? 'fixed' : 'defect');
     res.set('Cache-Control', 'no-store');
-    const filterCheck = req.path === '/demo/inventory/filter-check';
+    const filterCheck = req.path !== '/demo/inventory';
     const includeArchived = filterCheck ? !filters.length || !standFixed : standFixed && !filters.length;
     res.json({ items: includeArchived ? products : products.filter(({ status }) => status === 'active') });
+  });
+
+  app.get('/demo/inventory/reindex', (req, res) => {
+    if (req.get('X-Demo-Inventory-Key') !== inventoryHeaders['X-Demo-Inventory-Key']) {
+      res.sendStatus(404);
+      return;
+    }
+    if (Object.keys(req.query).length) {
+      res.sendStatus(400);
+      return;
+    }
+    res.set('X-Avito-Demo-Stand', standFixed ? 'fixed' : 'defect');
+    res.set('Cache-Control', 'no-store');
+    res.json({ items: standFixed ? indexedProducts : [...indexedProducts, indexedProducts[0]] });
   });
 
   app.use('/api', (_req, res, next) => {
@@ -109,26 +125,26 @@ export function createApp({ store, standOrigin, buddy, tracker, staticDir }: App
     next();
   });
   app.get('/api/workspace', (req, res) => {
-    const selected = req.query.task ?? task.id;
     const existing = identityFrom(req);
     const identity = existing ?? identities[0];
+    const assignments = store.assignments(identity.id);
+    const selected = req.query.task ?? assignments.find(({ authoringId }) => authoringId)?.id ?? task.id;
     const current = taskFor(selected, identity.id);
     if (!current) {
       res.status(404).json({ message: 'Задача недоступна в этой сессии.' });
       return;
     }
     if (!existing) setSession(res, identity);
-    const tasks = [...demoTasks, ...inventoryTasks.flatMap(({ id }) => store.assignment(id, identity.id) ?? [])];
+    const tasks = [...demoTasks, ...inventoryTasks.flatMap(({ id }) => assignments.find((candidate) => candidate.id === id) ?? []),
+      ...assignments.filter(({ authoringId }) => authoringId)];
     const traineeId = assignedTrainee(identity.id);
-    const assignmentCatalog = identity.role === 'mentor' ? { traineeId,
-      offers: inventoryTasks.map(({ id, title, criterion, instruction }) => ({ id, title, criterion,
-        version: instruction.version, assignedVersion: store.assignment(id, traineeId)?.instruction.version,
-      })),
-    } : undefined;
-    const context = { tasks, identity, standFixed, buddyMode: buddy.mode, buddyProvider: buddy.provider, assignmentCatalog };
+    const assignmentOffers = identity.role === 'mentor' ? inventoryTasks.map(({ id, title, criterion, instruction }) => ({
+      id, title, criterion, traineeId, version: instruction.version, assignedVersion: store.assignment(id, traineeId)?.instruction.version,
+    })) : undefined;
+    const context = { tasks, identity, standFixed, buddyMode: buddy.mode, buddyProvider: buddy.provider, assignmentOffers };
     const workspace: Workspace = selected === sortTask.id
       ? { ...context, kind: 'price-order', task: sortTask, checks: [priceCheck], orderItems: priceItems }
-      : { ...context, task: current, checks: setPlan(current).checks.map(({ id, label, path, parameter }) => ({ id, label, path, parameter })),
+      : { ...context, task: current, checks: setPlan(current).checks.map(({ id, label, path, parameter, uniqueIds }) => ({ id, label, path, parameter, uniqueIds })),
         attemptId: current.comparison ? store.openAttempt(current.id, identity.id) : undefined };
     res.json(workspace);
   });
@@ -154,6 +170,8 @@ export function createApp({ store, standOrigin, buddy, tracker, staticDir }: App
     next();
   });
 
+  registerAuthoring(app, store);
+
   const assignedTask: RequestHandler = (req, res, next) => {
     const current = res.locals.identity.role === 'trainee' ? taskFor(req.params.taskId, res.locals.identity.id) : undefined;
     if (!current) {
@@ -171,7 +189,10 @@ export function createApp({ store, standOrigin, buddy, tracker, staticDir }: App
       return;
     }
     const traineeId = assignedTrainee(mentor.id);
-    const template = inventoryTasks.find(({ id }) => id === req.body?.templateId);
+    const { versionId, templateId } = req.body ?? {};
+    const template = typeof versionId === 'string' && templateId === undefined
+      ? store.authoring.version(versionId, mentor.id)
+      : versionId === undefined ? inventoryTasks.find(({ id }) => id === templateId) : undefined;
     if (!template || req.body?.traineeId !== traineeId) {
       res.status(400).json({ message: 'Выбери поручение и своего стажёра.' });
       return;
@@ -190,7 +211,7 @@ export function createApp({ store, standOrigin, buddy, tracker, staticDir }: App
     const input = current.comparison ? parseChecks({ checks }, current) : undefined;
     const choice = input && attemptChoice(input, checkId);
     if (typeof attemptId !== 'string' || !choice) {
-      res.status(400).json({ message: 'Выбери запрос и отметь ожидаемые группы для обеих проверок.' });
+      res.status(400).json({ message: 'Выбери запрос и отметь ожидаемый результат каждого разрешённого запроса.' });
       return;
     }
     if (!store.setFirstChoice(attemptId, current.id, res.locals.identity.id, choice)) {
@@ -264,7 +285,7 @@ export function createApp({ store, standOrigin, buddy, tracker, staticDir }: App
     if ((!order && !cities) || (preparation !== undefined && !hasPreparation)) {
       res.status(400).json({ message: priceTask
         ? 'Задай ожидаемый порядок всех трёх объявлений.'
-        : current.comparison ? 'Выбери ожидаемые статусы для обоих разрешённых запросов.'
+        : current.comparison ? 'Выбери ожидаемый результат каждого разрешённого запроса.'
           : 'Выбери ожидаемые города для обоих разрешённых запросов.' });
       return;
     }
@@ -302,8 +323,8 @@ export function createApp({ store, standOrigin, buddy, tracker, staticDir }: App
 
   app.post('/api/tasks/:taskId/runs/:runId/publication', assignedTask, async (req, res) => {
     const conclusion = req.body?.conclusion ?? '';
-    if (typeof conclusion !== 'string' || conclusion.length > 1000) {
-      res.status(400).json({ message: 'Вывод должен содержать не более 1000 символов.' });
+    if (typeof conclusion !== 'string' || conclusion.length > 1000 || (res.locals.task.authoringId && !conclusion.trim())) {
+      res.status(400).json({ message: 'Введи вывод длиной до 1000 символов.' });
       return;
     }
     const owner: DemoIdentity['id'] = res.locals.identity.id;
@@ -380,7 +401,8 @@ export function createApp({ store, standOrigin, buddy, tracker, staticDir }: App
     const order = original.kind === 'price-order' && original.checks[0].path === priceCheck.path
       ? parsePriceCheck({ checks: original.checks.map(({ id, expectedOrder }) => ({ id, expectedOrder })) }) : undefined;
     const cities = current && original.kind !== 'price-order' && original.checks.every(({ id, path }) => setPlan(current).checks.some((check) => check.id === id && check.path === path))
-      ? parseChecks({ checks: original.checks.map(({ id, expectedCities }) => ({ id, expectedCities })) }, current) : undefined;
+      ? parseChecks({ checks: original.checks.map(({ id, expectedCities, expectedUniqueIds }) => expectedUniqueIds === undefined
+        ? { id, expectedCities } : { id, expectedCities, expectedUniqueIds }) }, current) : undefined;
     if (!order && !cities) {
       res.status(409).json({ message: 'Каталог изменился. Подготовь новый запрос по текущей инструкции.' });
       return;

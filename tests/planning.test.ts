@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createServer } from 'node:http';
 import { createBuddy } from '../server/buddy.ts';
+import { activeFilterTask } from '../server/archive-scenario.ts';
 import { sortTask } from '../server/price-scenario.ts';
 import { task } from '../server/scenario.ts';
 
@@ -67,6 +68,31 @@ describe('Structured Buddy workflow', () => {
       const before = received;
       expect(await ask()).toMatchObject({ mode: 'guide-fallback', kind: 'draft', fallbackReason: 'invalid-response' });
       expect(received - before).toBe(2);
+    } finally {
+      provider.closeAllConnections();
+      await new Promise<void>((resolve) => provider.close(() => resolve()));
+    }
+  });
+
+  it('constrains the provider to the known diagnostic check and its expected group', async () => {
+    let properties: unknown;
+    const provider = createServer(async (request, response) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) chunks.push(chunk);
+      properties = JSON.parse(Buffer.concat(chunks).toString()).response_format.json_schema.schema.properties;
+      response.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
+        kind: 'draft', text: 'Проверь фильтр по активным.', sources: [], checkId: 'active-only', expected: ['active'],
+      }) } }] }));
+    });
+    await new Promise<void>((resolve) => provider.listen(0, '127.0.0.1', resolve));
+    try {
+      const address = provider.address();
+      if (!address || typeof address === 'string') throw new Error('Expected TCP address');
+      const buddy = createBuddy({ BUDDY_BASE_URL: `http://127.0.0.1:${address.port}`, BUDDY_MODEL: 'fixture-model' });
+      const answer = await buddy.answer(activeFilterTask, { intent: 'plan', question: 'Достаточно проверить общую выдачу?' });
+      expect(answer).toMatchObject({ mode: 'model', draft: { checkId: 'active-only' } });
+      expect(properties).toMatchObject({ checkId: { enum: ['active-only'] },
+        expected: { minItems: 1, maxItems: 1, items: { enum: ['active'] } } });
     } finally {
       provider.closeAllConnections();
       await new Promise<void>((resolve) => provider.close(() => resolve()));

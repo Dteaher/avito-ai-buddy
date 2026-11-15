@@ -1,5 +1,5 @@
 import { groupLabels, type CheckResult, type ClaimVerdict, type PriceResult, type Run } from '../shared/contracts.ts';
-import { explainPriceRule, priceObservations } from '../shared/run-summary.ts';
+import { explainPriceRule, priceObservations, repeatedIds } from '../shared/run-summary.ts';
 
 export const priceClaims = {
   'numeric-ascending': 'числовые цены возрастают',
@@ -18,10 +18,11 @@ export const cityClaims = {
 export const archiveClaims = {
   'main-correct': 'состав выдачи без фильтра соответствует правилу',
   'control-correct': 'контроль по активным товарам соответствует правилу',
+  'duplicate-ids': 'в ответе есть повторяющиеся ID товаров',
   'main-missing-archive': 'без фильтра исчезли архивные товары',
-  'control-proves-main': 'успешный фильтр доказывает корректность общей выдачи',
-  'filtered-has-archive': 'архивные товары попали в ответ с status=active',
-  'unfiltered-proves-filter': 'общая выдача доказывает корректность фильтра',
+  'filtered-has-archive': 'фильтр по активным вернул архивные товары',
+  'control-proves-main': 'успешный контроль доказывает корректность выдачи без фильтра',
+  'baseline-proves-filter': 'общая выдача доказывает, что фильтр по активным работает',
 };
 
 function containsSame<T>(actual: T[], expected: T[]) {
@@ -64,10 +65,14 @@ function archiveFacts(check: CheckResult): Record<string, readonly [boolean, str
   const actual = check.actualCities.map((group) => groupLabels[group]).join(', ') || 'пусто';
   const expected = check.ruleCities.map((group) => groupLabels[group]).join(', ');
   const fact = `${check.label}: стенд вернул ${actual}. По правилу ожидаются ${expected}.`;
+  if (check.uniqueIds) {
+    const ids = repeatedIds(check.items);
+    return { 'duplicate-ids': [ids.length > 0, ids.length ? `Повторяющиеся ID: ${ids.join(', ')}.` : 'Все ID в ответе уникальны.'] };
+  }
   return main ? { 'main-correct': [same, fact], 'main-missing-archive': [!check.actualCities.includes('archived'), fact],
-    'unfiltered-proves-filter': [false, `${fact} Работу фильтра показывает отдельный запрос с status=active.`] }
+    'baseline-proves-filter': [false, `${fact} Для проверки фильтра нужен ответ запроса с status=active.`] }
     : { 'control-correct': [same, fact], 'filtered-has-archive': [check.actualCities.includes('archived'), fact],
-      'control-proves-main': [false, `${fact} Чтобы проверить архивные товары, открой ответ запроса без фильтра.`] };
+      'control-proves-main': [false, `${fact} Этот ответ проверяет фильтр. Полноту общей выдачи можно проверить по запросу без фильтра.`] };
 }
 
 function inferPrice(query: string) {
@@ -89,36 +94,34 @@ function inferPrice(query: string) {
   return claims;
 }
 
-function searchScope(query: string, filteredPrimary = false) {
-  const main = /без (?:фильтр|город|параметр)|нефильтрован|общ(?:ем|ий) запрос|общ.{0,8}выдач/.test(query)
-    || (filteredPrimary ? /контрол/.test(query) : /основн/.test(query));
+function searchScope(query: string, filteredFirst = false) {
+  const main = /без (?:фильтр|город|параметр)|нефильтрован|общ.{0,10}(?:запрос|выдач)/.test(query)
+    || (filteredFirst ? /контрол/ : /основн/).test(query);
   const control = /фильтр (?:по казан|казан|по активн)|city\s*=\s*kazan|status\s*=\s*active/.test(query)
-    || (filteredPrimary ? /основн/.test(query) : /контрол/.test(query));
+    || (filteredFirst ? /основн/ : /контрол/).test(query);
   if ((main && control) || /(?:оба|обоих)\s+(?:запрос|ответ)/.test(query)) return 'both';
   if (control) return 'control';
   if (main) return 'main';
 }
 
-function inferArchive(query: string, scope: ReturnType<typeof searchScope>, filteredPrimary: boolean) {
+function inferArchive(query: string, scope: ReturnType<typeof searchScope>, filteredFirst: boolean) {
   const claims: string[] = [];
   const missing = /архив.{0,35}(?:нет|отсутств|пропа|не приш)|(?:нет|отсутств|пропа|не приш).{0,35}архив/.test(query);
-  if (missing && scope !== 'control' && (!filteredPrimary || scope === 'main' || scope === 'both')) {
-    claims.push(/не (?:пропал|отсутств)/.test(query) ? 'not-main-missing-archive' : 'main-missing-archive');
-  }
-  const filteredClaim = scope === 'control' || (filteredPrimary && !scope);
-  if (filteredClaim && /архив/.test(query)) {
-    if (/нет|отсутств|не (?:попал|вернул|остал|приш)|исключ/.test(query)) claims.push('not-filtered-has-archive');
-    else if (/попал|вернул|остал|приш|есть|в списке/.test(query)) claims.push('filtered-has-archive');
+  if (missing && scope !== 'control') claims.push(/не (?:пропал|отсутств)/.test(query) ? 'not-main-missing-archive' : 'main-missing-archive');
+  if (scope === 'control') {
+    const present = /архив.{0,30}(?:присутств|попа|вернул|приш|остал)|(?:есть|присутств|попа|вернул|приш|остал).{0,30}архив/.test(query);
+    if (missing || present) {
+      const absent = missing ? !/не (?:отсутств|пропа)/.test(query) : /не (?:присутств|попа|вернул|приш|остал)/.test(query);
+      claims.push(absent ? 'not-filtered-has-archive' : 'filtered-has-archive');
+    }
   }
   const matches = /соответству|правильн|корректн|прош[её]л|работает|только активн/.test(query);
-  if (matches && !claims.length) {
-    const prefix = /не\s*(?:соответству|правильн|корректн|прош[её]л|работает)/.test(query) ? 'not-' : '';
-    if (scope === 'control' || scope === 'both' || (filteredPrimary && !scope)) claims.push(prefix + 'control-correct');
-    if (scope === 'main' || scope === 'both' || (!filteredPrimary && !scope)) claims.push(prefix + 'main-correct');
+  if (matches && (scope === 'control' || scope === 'both')) claims.push('control-correct');
+  if (matches && !missing && scope !== 'control') claims.push('main-correct');
+  if (filteredFirst && /(?:контрол|без фильтр|общ.{0,10}выдач).{0,65}(?:доказыва|подтвержда|значит).{0,45}(?:фильтр|status\s*=\s*active)/.test(query)) {
+    claims.push('baseline-proves-filter');
   }
-  if (/контрол.{0,55}(?:доказыва|достаточ|значит).{0,45}(?:фильтр|выдач|архив|все)/.test(query)) {
-    claims.push(filteredPrimary ? 'unfiltered-proves-filter' : 'control-proves-main');
-  }
+  if (!filteredFirst && /контрол.{0,55}(?:доказыва|достаточ|значит).{0,45}(?:без фильтра|выдач|архив|все)/.test(query)) claims.push('control-proves-main');
   return claims;
 }
 
@@ -169,21 +172,27 @@ function reviewClauses(query: string) {
 }
 
 export function reviewClaims(run: Run, query: string, extracted?: string[]) {
+  const filteredFirst = run.task.comparison?.checks[0].id === 'active-only';
+  const uniqueness = (text: string) => /дубл|уникаль|повтор.*(?:id|айди)|(?:id|айди).*повтор|одинаков.{0,12}(?:id|айди)/.test(text);
+  const checkUniqueness = run.task.authoringId && uniqueness(query);
+  const scope = checkUniqueness ? undefined : searchScope(query, filteredFirst);
   const price = run.kind === 'price-order';
   const archive = Boolean(run.task.comparison);
-  const filteredPrimary = run.task.comparison?.checks[0].id === 'active-only';
-  const scopeOf = (text: string) => searchScope(text, filteredPrimary);
-  const scope = scopeOf(query);
   const mainId = archive ? 'all-statuses' : 'without-city';
   const controlId = archive ? 'active-only' : 'kazan';
   const checks = price ? run.checks : run.checks.filter(({ id }) => scope === 'control' ? id === controlId
     : scope === 'main' ? id === mainId : true);
   const clauses = reviewClauses(query);
-  const scoped = clauses.map(({ clause, qualified }) => ({
-    qualified, scope: scopeOf(clause),
-    claims: price ? inferPrice(clause) : archive ? inferArchive(clause, scopeOf(clause) ?? scope, filteredPrimary)
-      : inferCities(clause, scopeOf(clause) ?? scope),
-  }));
+  const scoped = clauses.map(({ clause, qualified }) => {
+    const clauseScope = searchScope(clause, filteredFirst);
+    const effectiveScope = clauseScope ?? scope;
+    const duplicateClaim = checkUniqueness && uniqueness(clause);
+    const claims = duplicateClaim ? [/без дубл|нет дубл|не повтор|не дубл|уникаль/.test(clause) && !/не\s*уникаль|нет уникаль/.test(clause)
+      ? 'not-duplicate-ids' : 'duplicate-ids']
+      : price ? inferPrice(clause) : archive ? inferArchive(clause, effectiveScope, filteredFirst) : inferCities(clause, effectiveScope);
+    return { qualified, scope: duplicateClaim ? undefined : clauseScope,
+      claims };
+  });
   const claims = new Set(scoped.filter(({ qualified }) => !qualified).flatMap(({ claims }) => claims));
   const verdicts: ClaimVerdict[] = [];
   const sources = new Set<Run['checks'][number]['id']>();
@@ -206,7 +215,7 @@ export function reviewClaims(run: Run, query: string, extracted?: string[]) {
     const keys = neutral.flatMap(({ claims }) => claims);
     // A model-only interpretation may point to evidence. It cannot attribute a claim to the trainee.
     if (!claims.size && !neutral.length) keys.push(...(extracted ?? []));
-    const fallbackKey = price ? 'null-missing' : archive ? (check.id === controlId ? 'filtered-has-archive' : 'main-missing-archive')
+    const fallbackKey = 'uniqueIds' in check && check.uniqueIds ? 'duplicate-ids' : price ? 'null-missing' : archive ? (check.id === controlId ? 'control-correct' : 'main-missing-archive')
       : check.id === controlId ? 'control-missing-samara' : 'main-missing-samara';
     if (!keys.length && neutral.length) keys.push(fallbackKey);
     for (const claim of keys) {

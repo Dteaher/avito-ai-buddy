@@ -31,6 +31,8 @@ export function Workspace({ data, mode, chooseMode, revision }: {
   const [furthest, setFurthest] = useState(revision ? 1 : 0);
   const [choices, setChoices] = useState<Choices>(() => revision && revision.run.kind !== 'price-order'
     ? Object.fromEntries(revision.run.checks.map(({ id, expectedCities }) => [id, expectedCities])) : {});
+  const [uniqueChoices, setUniqueChoices] = useState<Partial<Record<CheckId, boolean>>>(() => revision && revision.run.kind !== 'price-order'
+    ? Object.fromEntries(revision.run.checks.map(({ id, expectedUniqueIds }) => [id, expectedUniqueIds])) : {});
   const [order, setOrder] = useState<string[]>(revision?.run.kind === 'price-order' ? revision.run.checks[0].expectedOrder : []);
   const [preparation, setPreparation] = useState<Preparation | undefined>(revision?.run.preparation);
   const [conclusion, setConclusion] = useState('');
@@ -45,16 +47,15 @@ export function Workspace({ data, mode, chooseMode, revision }: {
   const dialog = useRef<HTMLDialogElement>(null);
   const heading = useRef<HTMLHeadingElement>(null);
   const recordLink = useRef<HTMLAnchorElement>(null);
-  const runAction = useRef<HTMLButtonElement>(null);
+  const runButton = useRef<HTMLButtonElement>(null);
   const shouldFocus = useRef(false);
   const actionReady = priceTask ? order.length === data.orderItems.length
-    : (!data.attemptId || Boolean(selectedCheck)) && data.checks.every(({ id }) => choices[id] !== undefined);
+    : (!data.attemptId || Boolean(selectedCheck)) && data.checks.every(({ id, uniqueIds }) => choices[id] !== undefined && (!uniqueIds || uniqueChoices[id] !== undefined));
   const expectedGroups = task.comparison?.values ?? Object.keys(cities) as City[];
-  const statusChecks = task.comparison?.checks;
-  const formChecks = statusChecks?.[0].id === 'active-only' ? statusChecks.toReversed() : statusChecks;
   const attemptInput = () => ({
     attemptId: data.attemptId, checkId: data.attemptId ? selectedCheck : undefined,
-    checks: data.checks.flatMap(({ id }) => id === 'price-asc' ? [] : [{ id, expectedCities: choices[id] }]),
+    checks: priceTask ? [] : data.checks.map(({ id, uniqueIds }) => uniqueIds
+      ? { id, expectedCities: choices[id], expectedUniqueIds: uniqueChoices[id] } : { id, expectedCities: choices[id] }),
   });
 
   useEffect(() => {
@@ -69,7 +70,7 @@ export function Workspace({ data, mode, chooseMode, revision }: {
   }, [publication]);
 
   useEffect(() => {
-    if (firstChoice && document.activeElement === document.body) runAction.current?.focus();
+    if (firstChoice && document.activeElement === document.body) runButton.current?.focus();
   }, [firstChoice]);
 
   function move(next: number) {
@@ -99,11 +100,16 @@ export function Workspace({ data, mode, chooseMode, revision }: {
   function applyDraft(draft: CheckDraft, question: string) {
     if (busy || run) return;
     const choices: Choices = {};
+    const unique: Partial<Record<CheckId, boolean>> = {};
     for (const check of draft.checks) {
       if ('expectedOrder' in check) setOrder(check.expectedOrder);
-      else choices[check.id] = check.expectedCities;
+      else {
+        choices[check.id] = check.expectedCities;
+        unique[check.id] = check.expectedUniqueIds;
+      }
     }
     setChoices(choices);
+    setUniqueChoices(unique);
     if (data.attemptId && draft.checkId !== 'price-asc') setSelectedCheck(draft.checkId);
     setPreparation({ source: 'buddy-draft', question, checkId: draft.checkId });
     move(1);
@@ -167,7 +173,7 @@ export function Workspace({ data, mode, chooseMode, revision }: {
     <main className="container workspace">
       <section className="hero" aria-labelledby="page-title">
         <div className="hero-copy">
-          <span className="task-key">{task.id}</span>
+          <span className="task-key">{task.authoringId ? `Поручение · v${task.instruction.version}` : task.id}</span>
           <h1 id="page-title">Первая проверка</h1>
           <p>{task.title}</p>
         </div>
@@ -177,9 +183,9 @@ export function Workspace({ data, mode, chooseMode, revision }: {
         <span>{revision.review?.comment}</span></p>}
 
       <nav className="task-nav" aria-label="Рабочие задачи">
-        {data.tasks.map(({ id, shortTitle, comparison }) => (
-          <a key={id} href={id === 'SEARCH-01' ? '/' : `/?task=${encodeURIComponent(id)}`} aria-current={id === task.id ? 'page' : undefined}>
-            {shortTitle ?? (comparison ? 'Архивные товары' : id === 'SEARCH-01' ? 'Фильтр по городу' : 'Сортировка по цене')}
+        {data.tasks.map(({ id, comparison, shortTitle, title, authoringId, instruction }) => (
+          <a key={id} href={id === 'SEARCH-01' && !data.tasks.some((candidate) => candidate.authoringId) ? '/' : `/?task=${encodeURIComponent(id)}`} aria-current={id === task.id ? 'page' : undefined}>
+            {shortTitle ?? (authoringId ? `${title} · v${instruction.version}` : undefined) ?? (comparison ? 'Архивные товары' : id === 'SEARCH-01' ? 'Фильтр по городу' : 'Сортировка по цене')}
           </a>
         ))}
       </nav>
@@ -224,18 +230,18 @@ export function Workspace({ data, mode, chooseMode, revision }: {
               <p className="first-task-note">{task.comparison ? `Поручение наставника · версия правила ${task.instruction.version}` : 'Первая задача в команде поиска. Подготовь проверку API, зафиксируй результат и передай его наставнику.'}</p>
               {!priceTask && <div className="brief">
                 <span className="brief-icon"><ListChecks size={22} /></span>
-                <div><h3>Что считаем правильным</h3><p>{task.criterion}</p></div>
+                <div><h3>{task.authoringId ? 'Критерий успеха' : 'Что считаем правильным'}</h3><p>{task.criterion}</p></div>
               </div>}
-              <button type="button" className="text-link instruction-link" onClick={() => openSource()}><BookOpen size={18} /> Тестовая инструкция команды <ArrowUpRight size={15} /></button>
+              <button type="button" className="text-link instruction-link" onClick={() => openSource()}><BookOpen size={18} /> {task.authoringId ? 'Правило поручения' : 'Тестовая инструкция команды'} <ArrowUpRight size={15} /></button>
               <div className="actions">{data.attemptId && run ? <a href={`/?task=${task.id}`} className="button primary">Начать новую попытку</a>
-                : <button type="button" className="button primary" onClick={() => move(1)}>Подготовить проверку <ArrowRight size={19} /></button>}</div>
+                : <button type="button" className="button primary" onClick={() => move(1)}>{task.authoringId ? 'Начать проверку' : 'Подготовить проверку'} <ArrowRight size={19} /></button>}</div>
             </>
           )}
           {stage === 1 && (
             <>
               <div className="panel-heading"><h2 id="stage-title" tabIndex={-1} ref={heading}>Подготовить проверку</h2></div>
               <p className="stage-intro">{priceTask ? 'Задай ожидаемую последовательность по тестовой инструкции.'
-                : task.comparison ? 'Выбери запрос, который проверяет поручение. При запуске выполним оба запроса и покажем ответы отдельно.'
+                : task.comparison ? 'Выбери запрос, который проверяет поручение, и задай ожидания для каждого разрешённого запроса.'
                   : 'Выбери, какие города должны вернуться в каждом запросе.'}</p>
               <details className="response-details rule-expectation">
                 <summary>Ожидание по инструкции</summary>
@@ -245,18 +251,18 @@ export function Workspace({ data, mode, chooseMode, revision }: {
               {preparation && <p className="fallback-note" role="status">Черновик в форме. Проверь ожидание и при необходимости измени его.</p>}
               {data.attemptId && <fieldset className="attempt-pick" disabled={busy || savingChoice}>
                 <legend>Какой запрос проверяет поручение?</legend>
-                {formChecks?.map(({ id, label }) => <label key={id}>
-                  <input type="radio" name="check-choice" checked={selectedCheck === id} onChange={() => setSelectedCheck(id)} /> {label}
+                {data.checks.map(({ id, label }) => <label key={id}>
+                  <input type="radio" name="check-choice" checked={selectedCheck === id} onChange={() => setSelectedCheck(id as CheckId)} /> {label}
                 </label>)}
               </fieldset>}
               {priceTask ? <PriceOrderInput check={data.checks[0]} items={data.orderItems} order={order} disabled={busy} onChange={(next) => {
                 setOrder(next);
                 clearResult();
-              }} /> : (formChecks ?? data.checks).map((check, index) => {
+              }} /> : data.checks.map((check, index) => {
                 const selected = choices[check.id];
                 return (
                   <fieldset className="expectation" key={check.id} disabled={busy || savingChoice}>
-                    <legend>{formChecks ? check.label : index === 0 ? 'Основной запрос' : 'Контрольный запрос'}</legend>
+                    <legend>{task.authoringId ? check.label : index === 0 ? 'Основной запрос' : 'Контрольный запрос'}</legend>
                     <div className="request-heading"><span className="endpoint"><span>GET</span><code>{check.path}</code></span><span className="parameter">{check.parameter}</span></div>
                     <span className="field-label">{task.comparison ? 'Ожидаемые группы' : 'Ожидаемые города'}</span>
                     <div className="choices">
@@ -265,18 +271,27 @@ export function Workspace({ data, mode, chooseMode, revision }: {
                       ))}
                       <button type="button" aria-pressed={selected?.length === 0} onClick={() => select(check.id)}>Пустая выдача</button>
                     </div>
+                    {check.uniqueIds && <div>
+                      <span className="field-label">Ожидание по ID</span>
+                      <div className="choices">
+                        {[true, false].map((value) => <button type="button" key={String(value)} aria-pressed={uniqueChoices[check.id] === value}
+                          onClick={() => setUniqueChoices((current) => ({ ...current, [check.id]: value }))}>
+                          {value ? 'Все ID уникальны' : 'Есть повторяющиеся ID'}
+                        </button>)}
+                      </div>
+                    </div>}
                   </fieldset>
                 );
               })}
               {failure && <p className="action-error" role="alert"><CircleAlert size={19} />{failure}</p>}
               <div className="actions">
-                {data.attemptId && !firstChoice ? <button type="button" className="button primary" disabled={!actionReady || savingChoice || busy}
-                  onClick={() => void saveChoice()}>{savingChoice ? 'Сохраняем…' : 'Зафиксировать первый вариант'} <ArrowRight size={19} /></button> :
-                  <button type="button" ref={runAction} className="button primary run-action" disabled={!actionReady || savingChoice} aria-disabled={busy || undefined} onClick={() => void launch()}>
-                    {busy ? 'Запускаем проверку…' : failure ? 'Повторить проверку' : 'Запустить проверку'}
-                    {busy ? <LoaderCircle size={18} className="spinner" /> : <ArrowRight size={19} />}
-                  </button>}
+                {data.attemptId && !firstChoice && <button type="button" className={task.authoringId ? 'button primary' : 'button secondary'} disabled={!actionReady || savingChoice || busy}
+                  onClick={() => void saveChoice()}>{savingChoice ? 'Сохраняем…' : 'Зафиксировать первый вариант'}</button>}
                 {firstChoice && <p className="fact" role="status">Первый вариант сохранён · {data.checks.find(({ id }) => id === firstChoice.checkId)?.label}.</p>}
+                {(!task.authoringId || firstChoice) && <button type="button" ref={runButton} className="button primary run-action" disabled={!actionReady || savingChoice} aria-disabled={busy || undefined} onClick={() => void launch()}>
+                  {busy ? 'Запускаем проверку…' : failure ? 'Повторить проверку' : 'Запустить проверку'}
+                  {busy ? <LoaderCircle size={18} className="spinner" /> : <ArrowRight size={19} />}
+                </button>}
               </div>
             </>
           )}
@@ -288,22 +303,16 @@ export function Workspace({ data, mode, chooseMode, revision }: {
               <Evidence key={run.id} run={run} animate={animateResult} anchorPrefix="result-evidence" />
               <AttemptTrail run={run} openRule={openSource} />
               {stage === 2 && !publication && <Conclusion key={`${run.id}/${mode}`} run={run} value={conclusion} onChange={setConclusion} openRule={openSource} mode={mode} />}
-              {stage === 3 && <p className="record-conclusion"><strong>Твой вывод</strong>{(publication ? publication.conclusion : conclusion) || 'Вывод не добавлен.'}</p>}
-              {stage === 3 && publication && <p className="publication-status" role="status">
-                {publication.tracker?.status === 'delivered' && <>Доставлено в демо-трекер. Квитанция <code>{publication.tracker.id}</code>.</>}
-                {publication.tracker?.status === 'pending' && 'Запись сохранена. Открой её, чтобы повторить доставку в трекер.'}
-                {publication.tracker?.status === 'blocked' && 'Запись сохранена. Трекер отклонил отправку.'}
-                {!publication.tracker && 'Запись сохранена. Открой её, чтобы увидеть решение наставника.'}
-              </p>}
+              {stage === 3 && (publication?.conclusion || conclusion.trim()) && <p className="record-conclusion"><strong>Твой вывод</strong>{publication?.conclusion ?? conclusion}</p>}
               {stage === 3 && <details className="response-details">
-                <summary>Данные записи для трекера · {task.id} <ChevronDown size={17} className="disclosure" /></summary>
+                <summary>Данные записи для трекера{!task.authoringId && ` · ${task.id}`} <ChevronDown size={17} className="disclosure" /></summary>
                 <RunContext run={run} />
               </details>}
               {failure && <p className="action-error" role="alert"><CircleAlert size={19} />{failure}</p>}
               <div className="actions" key={stage}>
                 {stage === 2 ? (
                   <>
-                    <button type="button" className="button primary" onClick={() => move(3)}>
+                    <button type="button" className="button primary" disabled={Boolean(task.authoringId && !conclusion.trim() && !publication)} onClick={() => move(3)}>
                       {publication ? 'Открыть публикацию' : 'Опубликовать в задачу'} <ArrowRight size={19} />
                     </button>
                     {data.attemptId ? <a className="button secondary" href={`/?task=${task.id}`}>Начать новую попытку</a>
@@ -327,6 +336,12 @@ export function Workspace({ data, mode, chooseMode, revision }: {
                 )}
               </div>
               {stage === 3 && publication && task.id === 'SEARCH-01' && <NextTask />}
+              {publication && <p className="first-task-note" role="status">
+                {publication.tracker?.status === 'delivered' && <>Доставлено в демо-трекер. Квитанция <code>{publication.tracker.id}</code>.</>}
+                {publication.tracker?.status === 'pending' && 'Ожидает доставки. Открой запись, чтобы повторить отправку.'}
+                {publication.tracker?.status === 'blocked' && 'Запись сохранена. Трекер отклонил отправку.'}
+                {!publication.tracker && 'Запись сохранена. Открой её, чтобы увидеть решение наставника.'}
+              </p>}
             </>
           )}
         </section>

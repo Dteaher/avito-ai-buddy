@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { cities, type Check, type CheckInput, type CheckResult, type City, type CityRun, type Listing, type Task } from '../shared/contracts.ts';
+import { repeatedIds } from '../shared/run-summary.ts';
+import { cities, type CatalogCheck, type Check, type CheckInput, type CheckResult, type City, type CityRun, type Listing, type Task } from '../shared/contracts.ts';
 
 export const trainee = 'demo-trainee';
 
@@ -35,7 +36,7 @@ export function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-export function setPlan(current: Task = task) {
+export function setPlan(current: Task = task): { field: 'city' | 'status'; values: City[]; checks: CatalogCheck[] } {
   return current.comparison ?? {
     field: 'city' as const, values: Object.keys(cities) as City[],
     checks: checks.map((check) => ({ ...check, required: ruleCities[check.id] })),
@@ -49,10 +50,13 @@ export function parseChecks(body: unknown, current: Task = task): CheckInput[] |
 
   for (const check of checks) {
     const input = body.checks.find((candidate: unknown) => isObject(candidate) && candidate.id === check.id);
-    if (!isObject(input) || Object.keys(input).length !== 2) return;
+    if (!isObject(input) || Object.keys(input).length !== (check.uniqueIds ? 3 : 2)) return;
+    if (check.uniqueIds && typeof input.expectedUniqueIds !== 'boolean') return;
     const selected: unknown = input.expectedCities;
     if (!Array.isArray(selected) || selected.some((value) => !values.includes(value)) || new Set(selected).size !== selected.length) return;
-    selections.push({ id: check.id, expectedCities: values.filter((value) => selected.includes(value)) });
+    const expectedCities = values.filter((value) => selected.includes(value));
+    selections.push(check.uniqueIds ? { id: check.id, expectedCities, expectedUniqueIds: input.expectedUniqueIds as boolean }
+      : { id: check.id, expectedCities });
   }
 
   return selections;
@@ -90,10 +94,12 @@ async function checkResponse(origin: string, input: CheckInput, signal: AbortSig
   const expectedCities = [...input.expectedCities];
   const missing = expectedCities.filter((city) => !actualCities.includes(city));
   const extra = actualCities.filter((city) => !expectedCities.includes(city));
+  const duplicateIds = check.uniqueIds ? repeatedIds(items) : undefined;
+  const unique = !duplicateIds?.length;
   return {
-    ...check, expectedCities, status, standMode, items, rawBody, actualCities,
-    ruleCities: required, missing, extra, matches: missing.length + extra.length === 0,
-    followsRule: expectedCities.length === required.length && required.every((city) => expectedCities.includes(city)),
+    ...check, ...input, duplicateIds, status, standMode, items, rawBody, actualCities,
+    ruleCities: required, missing, extra, matches: missing.length + extra.length === 0 && (!check.uniqueIds || input.expectedUniqueIds === unique),
+    followsRule: expectedCities.length === required.length && required.every((city) => expectedCities.includes(city)) && (!check.uniqueIds || input.expectedUniqueIds === true),
   };
 }
 

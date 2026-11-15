@@ -122,7 +122,8 @@ export function createBuddy(env: NodeJS.ProcessEnv, observeModelAttempt?: () => 
         kind: 'insufficient', mode: 'guide', sources: [], text: 'Сначала выполни проверку или открой доступный прогон.',
       };
       const local: Reply = task.comparison
-        ? { kind: 'insufficient', text: 'В инструкции есть правила общей выдачи и фильтра по активным товарам. Какую часть выдачи нужно проверить?', rules: [] }
+        ? { kind: 'insufficient', text: task.authoringId ? 'Какой запрос из поручения хочешь проверить? Назови условие или открой инструкцию.'
+          : 'В инструкции есть правила общей выдачи и фильтра по активным товарам. Какую часть выдачи нужно проверить?', rules: [] }
         : price ? priceReplies[priceIntent(query, followUp === 'price')] : replies[guideIntent(query, followUp)];
       const groundingTask = run?.task ?? task;
       const evidence = buddyEvidence(groundingTask, run);
@@ -157,7 +158,7 @@ export function createBuddy(env: NodeJS.ProcessEnv, observeModelAttempt?: () => 
         try {
           const plan = intent ? undefined : planReply(query, answer, local, price, relatedTurns.at(-1), run);
           const relatedRules = selectedChecks?.flatMap(({ checkId }) => checkId === 'price-asc' ? ['rule:1', 'rule:2']
-            : [`rule:${checkRuleNumber(checkId)}`]);
+            : [`rule:${checkRuleNumber(checkId, groundingTask)}`]);
           const modelEvidence = selectedIds ? new Map([...evidence].filter(([id]) => selectedIds.has(id)
             || id === 'rule:3' || relatedRules?.includes(id))) : evidence;
           const workflow = intent ? workflowContract(groundingTask, intent, answer) : undefined;

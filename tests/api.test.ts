@@ -81,6 +81,120 @@ describe('SEARCH-01 over HTTP', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it('publishes immutable mentor versions and delivers a duplicate-ID finding through the real tracker', async () => {
+    const trackerPath = join(dir, 'authoring-tracker.sqlite');
+    const tracker = createTrackerService(trackerPath, 'authoring-test');
+    const trackerServer = createServer(tracker.app);
+    const target = await listen(trackerServer);
+    let receipt: string | undefined;
+    const proxy = createServer(async (req, res) => {
+      const body = [];
+      for await (const part of req) body.push(part as Buffer);
+      const saved = await fetch(target + req.url, { method: 'POST', headers: req.headers as HeadersInit, body: Buffer.concat(body) });
+      const result = await saved.json() as { id: string };
+      if (receipt === undefined && saved.status === 201) {
+        receipt = result.id;
+        res.destroy();
+        return;
+      }
+      res.writeHead(saved.status, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(result));
+    });
+    const send = createTrackerClient(await listen(proxy), 'authoring-test');
+    try {
+      await stop();
+      await start({}, send);
+      const mentor = await signIn('demo-mentor');
+      const other = await signIn('demo-trainee-b');
+      const editor = '/api/mentor/tasks';
+      const input = { title: 'Проверка индекса для ночной выгрузки', description: 'Партнёр получает активные товары из индекса.',
+        criterion: 'Каждый товар встречается в индексе один раз.', checkIds: ['reindex-active'] };
+      expect((await post(editor, input, other)).status).toBe(403);
+      expect((await post(editor, { ...input, checkIds: ['https://outside.example/q'] }, mentor)).status).toBe(400);
+      expect((await post(editor, { ...input, path: 'https://outside.example/q' }, mentor)).status).toBe(400);
+      const draft = await (await post(editor, { ...input, criterion: '' }, mentor)).json();
+      expect((await post(editor + '/' + draft.id + '/publish', { revision: draft.draft.revision }, mentor)).status).toBe(400);
+      expect((await post('/api/assignments', { versionId: draft.id + '-v1', traineeId: 'demo-trainee' }, mentor)).status).toBe(400);
+      const complete = await (await post(editor + '/' + draft.id + '/draft', { ...input, basedOn: draft.draft.revision }, mentor)).json();
+      const publish = (revision: string) => post(editor + '/' + draft.id + '/publish', { revision }, mentor);
+      expect((await publish(draft.draft.revision)).status).toBe(409);
+      const published = await publish(complete.revision);
+      expect(published.status).toBe(201);
+      const first = await published.json();
+      expect((await publish(complete.revision)).status).toBe(200);
+      const assignment = (versionId: string, traineeId = 'demo-trainee') => post('/api/assignments', { versionId, traineeId }, mentor);
+      expect((await assignment(first.id, 'demo-trainee-b')).status).toBe(400);
+      const retries = await Promise.all([assignment(first.id), assignment(first.id)]);
+      expect(retries.map(({ status }) => status).sort()).toEqual([200, 201]);
+
+      const taskPath = '/api/tasks/' + first.id;
+      const view = '/api/workspace?task=' + first.id;
+      expect((await get(view, other)).status).toBe(404);
+      expect((await get(taskPath + '/instruction', other)).status).toBe(404);
+      expect((await get('/demo/inventory/reindex', other)).status).toBe(404);
+      const workspace = await (await get(view)).json();
+      const selected = { attemptId: workspace.attemptId, checkId: 'reindex-active',
+        checks: [{ id: 'reindex-active', expectedCities: ['active'], expectedUniqueIds: true }] };
+      expect((await post(taskPath + '/attempt', selected)).status).toBe(200);
+      expect((await post(taskPath + '/runs', { ...selected, url: 'https://outside.example/q' })).status).toBe(400);
+      expect((await post(taskPath + '/runs', selected, other)).status).toBe(404);
+
+      const secondDraft = await (await post(editor + '/' + draft.id + '/draft',
+        { ...input, title: 'Проверка фильтра после выгрузки', checkIds: ['active-only'], basedOn: '1' }, mentor)).json();
+      const second = await (await publish(secondDraft.revision)).json();
+      expect(second.instruction.version).toBe('2.0');
+      expect((await get('/api/workspace?task=' + second.id)).status).toBe(404);
+      expect((await assignment(second.id)).status).toBe(201);
+
+      const advice = await (await post(taskPath + '/buddy', { attemptId: selected.attemptId,
+        question: 'Каким запросом проверить повторяющиеся ID?' })).json();
+      expect(advice).toMatchObject({ mode: 'guide', kind: 'draft', sources: [{ ruleNumber: 1 }],
+        draft: { checkId: 'reindex-active', checks: selected.checks } });
+      const result = await (await post(taskPath + '/runs', selected)).json();
+      expect(result).toMatchObject({ task: first, attempt: { help: 'after-choice', first: { checks: selected.checks }, final: { checks: selected.checks } },
+        checks: [{ status: 200, matches: false, actualCities: ['active'], duplicateIds: ['sku-401'] }] });
+      const conclusion = 'В ответе повторяется ID sku-401.';
+      const feedback = { question: conclusion, runId: result.id, intent: 'review' };
+      expect(await (await post(taskPath + '/buddy', feedback)).json()).toMatchObject({
+        verdicts: [{ status: 'confirmed', text: expect.stringContaining('sku-401') }],
+        sources: [{ runId: result.id, checkId: 'reindex-active' }, { ruleNumber: 1 }],
+      });
+      expect((await post(taskPath + '/buddy', feedback, other)).status).toBe(404);
+      const record = await (await post(taskPath + '/runs/' + result.id + '/publication', { conclusion })).json();
+      expect(record.tracker).toEqual({ status: 'pending' });
+      expect(receipt).toMatch(/^TRK-/);
+
+      await stop();
+      await start({}, send);
+      const recordPath = '/api/records/' + record.id;
+      expect((await get(recordPath, other)).status).toBe(404);
+      expect((await get(recordPath, mentor)).status).toBe(200);
+      const recovered = await (await post(recordPath + '/tracker')).json();
+      expect(recovered).toEqual({ status: 'delivered', id: receipt });
+      const trackerDb = new DatabaseSync(trackerPath, { readOnly: true });
+      try {
+        expect(trackerDb.prepare('SELECT id, task FROM evidence').all()).toEqual([{ id: receipt, task: 'ENG-AUTHORED' }]);
+      } finally {
+        trackerDb.close();
+      }
+
+      await post('/api/demo/stand', { fixed: true }, mentor);
+      const replay = await (await post(recordPath + '/replay', {}, mentor)).json();
+      expect(replay).toMatchObject({ task: first, checks: [{ matches: true, duplicateIds: [] }] });
+      expect(await (await post(taskPath + '/buddy', { ...feedback, runId: replay.id })).json())
+        .toMatchObject({ verdicts: [{ status: 'refuted' }] });
+      expect(await (await post(recordPath + '/review', { decision: 'accepted' }, mentor)).json()).toMatchObject({
+        run: result, conclusion, tracker: recovered, review: { decision: 'accepted' },
+      });
+      expect(await (await get(editor, mentor)).json()).toMatchObject({
+        projects: [{ versions: [{ task: second, assigned: true }, { task: first, assigned: true }] }],
+      });
+    } finally {
+      await Promise.all([proxy, trackerServer].map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
+      tracker.close();
+    }
+  });
+
   it('keeps a confirmed publication during tracker failure and resends only its original evidence after restart', async () => {
     const send = vi.fn().mockResolvedValueOnce({ status: 'pending' }).mockResolvedValue({ status: 'delivered', id: 'TRK-42' });
     await stop();
@@ -161,7 +275,7 @@ describe('SEARCH-01 over HTTP', () => {
     const traineeB = await signIn('demo-trainee-b');
     expect((await get(selection)).status).toBe(404);
     const templates = await (await get('/api/workspace', mentor)).json();
-    expect(templates.assignmentCatalog.offers.map(({ id }: { id: string }) => id)).toEqual(['ARCHIVE-01', 'ACTIVE-01']);
+    expect(templates.assignmentOffers.map(({ id }: { id: string }) => id)).toEqual(['ARCHIVE-01', 'ACTIVE-01']);
     for (const templateId of ['ARCHIVE-01', 'ACTIVE-01']) {
       expect((await post('/api/assignments', { templateId, traineeId: 'demo-trainee' }, mentor)).status).toBe(201);
     }
@@ -169,7 +283,7 @@ describe('SEARCH-01 over HTTP', () => {
     expect((await get(`${active}/instruction`, traineeB)).status).toBe(404);
     expect((await post(`${active}/runs`, {}, traineeB)).status).toBe(404);
     expect((await post(`${active}/buddy`, { question: 'Что проверить?' }, traineeB)).status).toBe(404);
-    expect((await get('/demo/inventory/filter-check?status=active', traineeB)).status).toBe(404);
+    expect((await get('/demo/inventory/audit?status=active', traineeB)).status).toBe(404);
 
     const workspace = await (await get(selection)).json();
     expect(workspace.tasks.map(({ id }: { id: string }) => id)).toEqual(['SEARCH-01', 'SORT-01', 'ARCHIVE-01', 'ACTIVE-01']);
@@ -303,8 +417,8 @@ describe('SEARCH-01 over HTTP', () => {
     const other = await signIn('demo-trainee-b');
     const path = '/api/tasks/ACTIVE-01';
     const workspacePath = '/api/workspace?task=ACTIVE-01';
-    const offers = (await (await get('/api/workspace', mentor)).json()).assignmentCatalog;
-    expect(offers).toMatchObject({ traineeId: 'demo-trainee', offers: [{ id: 'ARCHIVE-01' }, { id: 'ACTIVE-01' }] });
+    const offers = (await (await get('/api/workspace', mentor)).json()).assignmentOffers;
+    expect(offers).toMatchObject([{ id: 'ARCHIVE-01', traineeId: 'demo-trainee' }, { id: 'ACTIVE-01', traineeId: 'demo-trainee' }]);
     const input = { templateId: 'ACTIVE-01', traineeId: 'demo-trainee' };
     expect((await post('/api/assignments', { ...input, traineeId: 'demo-trainee-b' }, mentor)).status).toBe(400);
     expect((await post('/api/assignments', input, mentor)).status).toBe(201);
@@ -336,6 +450,9 @@ describe('SEARCH-01 over HTTP', () => {
     expect(await (await post(`${path}/buddy`, feedback)).json()).toMatchObject({
       verdicts: [{ status: 'confirmed' }], sources: [{ checkId: 'active-only' }, { ruleNumber: 2 }],
     });
+    expect(await (await post(`${path}/buddy`, {
+      ...feedback, question: 'Контрольный запрос вернул обе группы, значит фильтр корректен.',
+    })).json()).toMatchObject({ verdicts: expect.arrayContaining([expect.objectContaining({ status: 'refuted' })]) });
     const record = await (await post(`${path}/runs/${result.id}/publication`, { conclusion })).json();
     const recordPath = `/api/records/${record.id}`;
     const reviewer = await signIn('demo-mentor');

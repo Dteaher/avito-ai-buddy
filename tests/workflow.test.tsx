@@ -68,6 +68,45 @@ async function prepare(user: ReturnType<typeof userEvent.setup>) {
 }
 
 describe('First Check workspace', () => {
+  it('reopens a mentor draft and assigns the exact published version shown in preview', async () => {
+    const user = userEvent.setup();
+    const mentor = { id: 'demo-mentor', role: 'mentor', name: 'Наставник' } as const;
+    const trainee = { id: 'demo-trainee', role: 'trainee', name: 'Стажёр А' } as const;
+    const input = { title: 'Снимок индекса', description: 'Проверить выгрузку.', criterion: 'ID товаров уникальны.', checkIds: ['reindex-active'] as const };
+    const saved = { id: 'project', draft: { input, revision: 'draft-r1' }, versions: [] };
+    const version = { version: 1, input, assigned: false, task: { ...task, id: 'project-v1', title: input.title,
+      instruction: { ...task.instruction, version: '1.0' } } };
+    let projects: object[] = [saved];
+    const mock = vi.fn<(url: string, init?: RequestInit) => Promise<Response>>(async (url) => {
+      if (url === '/api/workspace') return Response.json({ ...workspace, identity: mentor });
+      if (url === '/api/records') return Response.json([]);
+      if (url === '/api/mentor/tasks/project/publish') {
+        projects = [{ id: 'project', versions: [version] }];
+        return Response.json(version.task);
+      }
+      if (url === '/api/assignments') {
+        projects = [{ id: 'project', versions: [{ ...version, assigned: true }] }];
+        return Response.json({ task: version.task, traineeId: trainee.id });
+      }
+      return Response.json({ projects, trainees: [trainee], catalog: [{
+        id: 'reindex-active', label: 'После переиндексации', path: '/demo/inventory/reindex', required: ['active'], uniqueIds: true,
+      }] });
+    });
+    vi.stubGlobal('fetch', mock);
+    window.history.replaceState(null, '', '/?editor=1');
+    render(<App />);
+    await user.selectOptions(await screen.findByLabelText(/Сохранённые поручения/), 'project');
+    expect(screen.getByRole<HTMLTextAreaElement>('textbox', { name: 'Критерий успеха' }).value).toBe(input.criterion);
+    expect(within(screen.getByRole('region', { name: 'Предпросмотр стажёра' })).getByText(/ID товаров уникальны$/, { selector: 'li' })).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Опубликовать версию' }));
+    await user.click(await screen.findByRole('button', { name: 'Назначить версию 1.0' }));
+    expect(await screen.findByText('Назначено · Стажёр А')).toBeTruthy();
+    const publish = mock.mock.calls.find(([url]) => url.endsWith('/publish'));
+    const assignment = mock.mock.calls.find(([url]) => url === '/api/assignments');
+    expect(JSON.parse(String(publish?.[1]?.body))).toEqual({ revision: 'draft-r1' });
+    expect(JSON.parse(String(assignment?.[1]?.body))).toEqual({ versionId: 'project-v1', traineeId: trainee.id });
+  });
+
   it('connects the positions of a priced listing when the no-price listing stays put', () => {
     const items = [priceItems[0], priceItems[2], priceItems[1]];
     const expectedOrder = ['ad-201', 'ad-202', 'ad-203'];

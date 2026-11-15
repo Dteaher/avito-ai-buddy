@@ -3,11 +3,14 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import express from 'express';
+import { authoredTaskId } from './task-catalog.ts';
 import type { TrackerDelivery } from '../shared/contracts.ts';
 
 const taskLinks = new Map([
   ['SEARCH-01', 'ENG-101'], ['SORT-01', 'ENG-102'], ['ARCHIVE-01', 'ENG-103'], ['ACTIVE-01', 'ENG-104'],
 ]);
+
+const trackerTaskFor = (taskId: string) => taskLinks.get(taskId) ?? (authoredTaskId.test(taskId) ? 'ENG-AUTHORED' : undefined);
 
 export interface TrackerEvidence {
   taskId: string;
@@ -33,7 +36,7 @@ export function trackerConfig(env: NodeJS.ProcessEnv) {
 
 export function createTrackerClient(origin: string, secret: string): SendToTracker {
   return async (evidence) => {
-    const trackerTask = taskLinks.get(evidence.taskId);
+    const trackerTask = trackerTaskFor(evidence.taskId);
     if (!trackerTask) return { status: 'blocked' };
     try {
       const response = await fetch(`${origin}/v1/tasks/${trackerTask}/evidence`, {
@@ -62,7 +65,7 @@ export function createTrackerClient(origin: string, secret: string): SendToTrack
 function evidenceBody(input: Partial<TrackerEvidence> | undefined, trackerTask: string) {
   if (!input) return;
   const { taskId, publicationId, runId, ruleId, ruleVersion, localEvidenceUrl, conclusion } = input;
-  if (typeof taskId !== 'string' || taskLinks.get(taskId) !== trackerTask
+  if (typeof taskId !== 'string' || trackerTaskFor(taskId) !== trackerTask
     || typeof publicationId !== 'string' || !/^QA-[\w-]{1,40}$/.test(publicationId)
     || typeof runId !== 'string' || !runId || typeof ruleId !== 'string' || !ruleId
     || typeof ruleVersion !== 'string' || !ruleVersion || localEvidenceUrl !== `/records/${publicationId}`

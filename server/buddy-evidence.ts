@@ -28,7 +28,7 @@ export function buddyEvidence(task: Task, run?: Run) {
   const requests = run?.checks ?? (task.id === sortTask.id ? [priceCheck] : setPlan(task).checks);
   task.instruction.rules.forEach((rule, index) => {
     const ruleNumber = index + 1;
-    const check = requests[index];
+    const check = task.authoringId || task.id === sortTask.id ? requests[index] : requests.find(({ id }) => checkRuleNumber(id) === ruleNumber);
     const facts = check ? `${rule} Разрешённый запрос — GET ${check.path}.` : rule;
     evidence.set(`rule:${ruleNumber}`, { source: { instructionId: task.instruction.id, ruleNumber }, facts });
   });
@@ -46,8 +46,8 @@ export function buddyEvidence(task: Task, run?: Run) {
 export function guideRunAnswer(query: string, run: Run | undefined, evidence: Map<string, EvidenceEntry>): Pick<BuddyAnswer, 'kind' | 'text' | 'sources'> | undefined {
   if (!run || !/прогон|расхожд|фактич|итог|сырой|отчет|пропал[аи]? из ответа|сдвинул|что (?:было|пришло) в (?:контрольн|основн)|что вернул (?:стенд|контрольн|основн)|результат (?:стенда|проверки)|стенд (?:вернул|показал)/.test(query)) return;
   const [primary, control] = run.checks;
-  let relevant: Run['checks'][number][] = [primary];
-  if (control) {
+  let relevant: Run['checks'][number][] = run.task.authoringId ? run.checks : [primary];
+  if (control && !run.task.authoringId) {
     const mentionsPrimary = /основн|без (?:города|фильтра)/.test(query);
     const mentionsControl = /контроль|city\s*=\s*kazan|status\s*=\s*active|фильтр по казани/.test(query);
     if ((mentionsPrimary && mentionsControl) || /оба|дв[ае]|кажд|запросы|что показал прогон/.test(query)) relevant = [primary, control];
@@ -58,10 +58,10 @@ export function guideRunAnswer(query: string, run: Run | undefined, evidence: Ma
     } else if (!mentionsPrimary) relevant = [primary, control];
   }
   const entries = relevant.map(({ id }) => evidence.get(`run:${id}`)!);
-  const status = /\b200\b|код ответа|статус/.test(query) ? evidence.get('rule:3') : undefined;
+  const status = /\b200\b|код ответа|статус/.test(query) ? evidence.get(run.task.authoringId ? '' : 'rule:3') : undefined;
   if (status) entries.unshift(status);
   for (const check of relevant.filter(({ followsRule }) => !followsRule)) {
-    const rule = evidence.get(`rule:${checkRuleNumber(check.id)}`);
+    const rule = evidence.get(`rule:${checkRuleNumber(check.id, run.task)}`);
     if (rule) entries.push(rule);
   }
   return { kind: 'guidance', text: entries.map(({ facts }) => facts).join('\n\n'), sources: entries.map(({ source }) => source) };
