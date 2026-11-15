@@ -71,9 +71,9 @@ function ResponseDetails({ check }: { check: ResponseCheck }) {
   );
 }
 
-function CityEvidence({ check, label = check.label }: { check: CheckResult; label?: string }) {
+function CityEvidence({ check, label = check.label, anchor }: { check: CheckResult; label?: string; anchor?: string }) {
   return (
-    <section aria-label={label}>
+    <section id={anchor} aria-label={label}>
       <div className="request-heading"><RequestLine check={check} /><span className="http-status">HTTP {check.status}</span></div>
       <Comparison check={check} />
       <ResponseDetails check={check} />
@@ -81,11 +81,14 @@ function CityEvidence({ check, label = check.label }: { check: CheckResult; labe
   );
 }
 
-export function Evidence({ run, animate = false, checkId }: { run: Run; animate?: boolean; checkId?: RunEvidenceSource['checkId'] }) {
+export function Evidence({ run, animate = false, checkId, anchorPrefix }: {
+  run: Run; animate?: boolean; checkId?: RunEvidenceSource['checkId']; anchorPrefix?: string;
+}) {
+  const anchor = (id: string) => anchorPrefix ? `${anchorPrefix}-${id}` : undefined;
   if (run.kind === 'price-order') {
     const [check] = run.checks;
     return (
-      <section className={`evidence${animate ? ' reveal' : ''}`} aria-label="Основной запрос">
+      <section id={anchor(check.id)} className={`evidence${animate ? ' reveal' : ''}`} aria-label="Основной запрос">
         <div className="request-heading"><RequestLine check={check} /><span className="http-status">HTTP {check.status}</span></div>
         <PriceComparison check={check} animate={animate} />
         <ResponseDetails check={check} />
@@ -96,8 +99,8 @@ export function Evidence({ run, animate = false, checkId }: { run: Run; animate?
   if (checkId) return <div className="evidence"><CityEvidence check={checkId === control.id ? control : primary} /></div>;
   return (
     <div className={`evidence${animate ? ' reveal' : ''}`}>
-      <CityEvidence check={primary} label="Основной запрос" />
-      <details className="control-details">
+      <CityEvidence check={primary} label="Основной запрос" anchor={anchor(primary.id)} />
+      <details id={anchor(control.id)} className="control-details">
         <summary>
           <span className="control-label"><strong>Контрольный запрос</strong><span>{control.label}</span></span>
           <span className={`verdict-chip ${control.matches ? 'ok' : 'bad'}`}>

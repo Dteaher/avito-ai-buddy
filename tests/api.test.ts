@@ -79,6 +79,60 @@ describe('SEARCH-01 over HTTP', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it('versions returned conclusions once, keeps the canonical publication and scopes decisions to versions', async () => {
+    const mentor = await signIn('demo-mentor');
+    const second = await signIn('demo-trainee-b');
+    const originalRun = await (await run()).json();
+    const publicationPath = `${task}/runs/${originalRun.id}/publication`;
+    const original = await (await post(publicationPath, { conclusion: 'Всё работает.' })).json();
+    const path = `/api/records/${original.id}`;
+    const input = { conclusion: 'В ответе без фильтра отсутствует Самара.' };
+    expect((await post(`${path}/revisions`, input)).status).toBe(409);
+    const results = await Promise.all([
+      post(`${path}/review`, { decision: 'returned', comment: 'Укажи, какой город отсутствует.' }, mentor),
+      post(`${path}/review`, { decision: 'returned', comment: 'Укажи, какой город отсутствует.' }, mentor),
+    ]);
+    expect(results.map(({ status }) => status).sort()).toEqual([200, 409]);
+    expect((await post(`${path}/revisions`, input, second)).status).toBe(404);
+    expect((await post(`${path}/revisions`, input, mentor)).status).toBe(404);
+    const foreignRun = await (await post(`${task}/runs`, { checks }, second)).json();
+    expect((await post(`${path}/revisions`, { ...input, runId: foreignRun.id })).status).toBe(404);
+    const revised = await Promise.all([post(`${path}/revisions`, input), post(`${path}/revisions`, input)]);
+    expect(revised.map(({ status }) => status).sort()).toEqual([200, 201]);
+    const [version, duplicate] = await Promise.all(revised.map((response) => response.json()));
+    expect(version.id).toBe(duplicate.id);
+    expect(version).toMatchObject({ run: originalRun, conclusion: input.conclusion, previous: {
+      id: original.id, conclusion: original.conclusion, review: { comment: 'Укажи, какой город отсутствует.' },
+    } });
+    expect((await post(`${path}/revisions`, { conclusion: 'Другая правка' })).status).toBe(409);
+    const repeated = await (await post(publicationPath, input)).json();
+    expect(repeated.id).toBe(original.id);
+    expect((await get(`/api/records/${version.id}`, second)).status).toBe(404);
+    expect((await post(`/api/records/${version.id}/review`, { decision: 'accepted' }, mentor)).status).toBe(200);
+    await stop();
+    await start();
+    expect(await (await get(path)).json()).toMatchObject({
+      conclusion: original.conclusion, nextId: version.id, review: { decision: 'returned' },
+    });
+    expect(await (await get(`/api/records/${version.id}`, mentor)).json()).toMatchObject({
+      previous: { id: original.id }, review: { decision: 'accepted' },
+    });
+  });
+
+  it('links corrections that use a new run and reserves their canonical publication', async () => {
+    const mentor = await signIn('demo-mentor');
+    const original = await (await run()).json();
+    const record = await (await post(`${task}/runs/${original.id}/publication`)).json();
+    const path = `/api/records/${record.id}`;
+    await post(`${path}/review`, { decision: 'returned', comment: 'Исправь ожидание.' }, mentor);
+    const changed = await (await run([{ id: 'without-city', expectedCities: ['kazan'] }, checks[1]])).json();
+    const response = await post(`${path}/revisions`, { conclusion: 'Сверка с новым ожиданием.', runId: changed.id });
+    expect(response.status).toBe(201);
+    const version = await response.json();
+    expect(version).toMatchObject({ previous: { id: record.id, runId: original.id }, run: { id: changed.id } });
+    expect(await (await post(`${task}/runs/${changed.id}/publication`)).json()).toMatchObject({ id: version.id });
+  });
+
   it('persists independent sessions, restricts unpublished data and reviews only assigned publications', async () => {
     const firstCookie = cookie;
     const second = await signIn('demo-trainee-b');
@@ -100,6 +154,9 @@ describe('SEARCH-01 over HTTP', () => {
     const recordPath = `/api/records/${firstRecord.id}`;
     expect((await get(recordPath, second)).status).toBe(404);
     expect((await get(`/api/records/${secondRecord.id}`, mentor)).status).toBe(404);
+    expect((await post(`/api/records/${secondRecord.id}/replay`, {}, mentor)).status).toBe(404);
+    expect((await post(`/api/records/${secondRecord.id}/revisions`, { conclusion: 'Правка' })).status).toBe(404);
+    expect((await post(`${task}/buddy`, { question: 'Сверь вывод', intent: 'review', runId: firstRun.id }, mentor)).status).toBe(404);
     expect((await post(`/api/records/${secondRecord.id}/review`, { decision: 'accepted' }, mentor)).status).toBe(404);
     expect((await post(`${recordPath}/review`, { decision: 'accepted' })).status).toBe(403);
     expect((await post(`${recordPath}/review`, { decision: 'returned', comment: ' ' }, mentor)).status).toBe(400);
@@ -190,12 +247,19 @@ describe('SEARCH-01 over HTTP', () => {
     legacy.exec(`
       CREATE TABLE runs (id TEXT PRIMARY KEY, owner TEXT NOT NULL, task_id TEXT NOT NULL, snapshot TEXT NOT NULL);
       CREATE TABLE records (id TEXT PRIMARY KEY, run_id TEXT NOT NULL UNIQUE REFERENCES runs(id), published_at TEXT NOT NULL);
+      CREATE TABLE reviews (record_id TEXT PRIMARY KEY REFERENCES records(id), decision TEXT NOT NULL, comment TEXT NOT NULL, reviewed_at TEXT NOT NULL);
+      CREATE TABLE record_replays (record_id TEXT PRIMARY KEY REFERENCES records(id), run_id TEXT NOT NULL REFERENCES runs(id));
     `);
     legacy.prepare('INSERT INTO runs VALUES (?, ?, ?, ?)').run(original.id, 'demo-trainee', 'SEARCH-01', JSON.stringify(original));
     legacy.prepare('INSERT INTO records VALUES (?, ?, ?)').run('QA-legacy', original.id, original.checkedAt);
+    legacy.prepare('INSERT INTO reviews VALUES (?, ?, ?, ?)').run('QA-legacy', 'returned', 'Старый комментарий', original.checkedAt);
+    legacy.prepare('INSERT INTO record_replays VALUES (?, ?)').run('QA-legacy', original.id);
     legacy.close();
     const oldStore = createStore(legacyLocation);
-    expect(oldStore.readRecord('QA-legacy', 'demo-trainee')).toMatchObject({ url: '/records/QA-legacy', run: original });
+    expect(oldStore.readRecord('QA-legacy', 'demo-trainee')).toMatchObject({
+      url: '/records/QA-legacy', run: original, review: { comment: 'Старый комментарий' },
+    });
+    expect(oldStore.readReplay('QA-legacy', 'demo-trainee')).toMatchObject({ replayBy: 'demo-trainee', replay: original });
     oldStore.close();
     await start();
     const record = await (await post(`${task}/runs/${original.id}/publication`)).json();
@@ -203,7 +267,7 @@ describe('SEARCH-01 over HTTP', () => {
     const mentor = await signIn('demo-mentor');
     const second = await signIn('demo-trainee-b');
     expect((await post(`${recordPath}/replay`, {}, second)).status).toBe(404);
-    expect((await post(`${recordPath}/replay`, {}, mentor)).status).toBe(404);
+    expect((await post(`${recordPath}/replay`, {}, mentor)).status).toBe(201);
     const changedStand = createServer((req, res) => res.end(JSON.stringify({ items: req.url?.includes('city=kazan')
       ? [{ id: '1', title: 'Казань', city: 'kazan' }]
       : [{ id: '1', title: 'Казань', city: 'kazan' }, { id: '2', title: 'Самара', city: 'samara' }] })));
@@ -215,7 +279,7 @@ describe('SEARCH-01 over HTTP', () => {
       expect(replay.id).not.toBe(original.id);
       expect(replay.checks[0]).toMatchObject({ matches: true, expectedCities: original.checks[0].expectedCities });
       expect(await (await get(recordPath)).json()).toMatchObject({ run: original, replay });
-      expect(await (await get(recordPath, mentor)).json()).not.toHaveProperty('replay');
+      expect(await (await get(recordPath, mentor)).json()).toMatchObject({ replay });
       expect(await (await get(`${task}/runs/${replay.id}`)).json()).toEqual(replay);
       const later = await post(`${recordPath}/replay`, {});
       expect(later.status).toBe(201);

@@ -32,6 +32,11 @@ export function Buddy({ workspace, openSource, run, collapsible = false, intent,
   const bodyId = useId();
   const log = useRef<HTMLDivElement>(null);
   const evidenceDialog = useRef<HTMLDialogElement>(null);
+  const activeRequest = useRef<AbortController | null>(null);
+  const currentRun = useRef(run?.id);
+
+  useEffect(() => () => activeRequest.current?.abort(), []);
+  useEffect(() => { currentRun.current = run?.id; }, [run?.id]);
 
   useEffect(() => {
     const node = log.current;
@@ -41,6 +46,8 @@ export function Buddy({ workspace, openSource, run, collapsible = false, intent,
   async function ask(question: string, keepDraft = false, requestedIntent?: 'plan') {
     const text = question.trim();
     if (!text || pending) return;
+    const controller = new AbortController();
+    activeRequest.current = controller;
     const related = messages.filter((message) => message.intent === requestedIntent && message.mode === mode);
     const previous = related.findLast(({ answer }) => answer)?.answer;
     const conversationId = related.findLast(({ answer }) => answer?.conversationId)?.answer?.conversationId;
@@ -56,12 +63,15 @@ export function Buddy({ workspace, openSource, run, collapsible = false, intent,
     if (!keepDraft) setDraft('');
 
     try {
-      const answer = await post<BuddyAnswer>(`/api/tasks/${task.id}/buddy`, input);
-      setMessages((previous) => [...previous.slice(0, -1), { ...exchange, answer }]);
+      let answer = await post<BuddyAnswer>(`/api/tasks/${task.id}/buddy`, input, controller.signal);
+      if (answer.draft && currentRun.current !== run?.id) {
+        answer = { ...answer, draft: undefined, text: 'Черновик был подготовлен до смены прогона. Открой ожидание и задай вопрос заново.' };
+      }
+      if (!controller.signal.aborted) setMessages((previous) => [...previous.slice(0, -1), { ...exchange, answer }]);
     } catch (error) {
-      setFailure(errorMessage(error));
+      if (!controller.signal.aborted) setFailure(errorMessage(error));
     } finally {
-      setPending(false);
+      if (!controller.signal.aborted) setPending(false);
     }
   }
 
@@ -128,12 +138,15 @@ export function Buddy({ workspace, openSource, run, collapsible = false, intent,
               {answer?.sources.some((source) => 'runId' in source && source.runId !== run?.id) && <p className="fallback-note">Ответ по предыдущему прогону</p>}
               {answer && <p className="bubble assistant">{answer.text}</p>}
               {answer?.draft && <div className="draft-preview">
+                <strong>В форму попадёт</strong>
                 <code>GET {answer.draft.path}</code>
                 <p>{answer.draft.checks.filter(({ id }) => id === answer.draft?.checkId).map((check) => 'expectedOrder' in check
                   ? check.expectedOrder.map((id) => {
                     const item = orderItems?.find((entry) => entry.id === id);
                     return item?.price == null ? 'без цены' : `${item.price} ₽`;
                   }).join(' → ') : check.expectedCities.map((city) => cities[city]).join(' · '))}</p>
+                {answer.draft.checks.filter(({ id }) => id !== answer.draft?.checkId).map((check) => 'expectedCities' in check &&
+                  <p key={check.id}>{check.id === 'kazan' ? 'С фильтром' : 'Без фильтра'} · {check.expectedCities.map((city) => cities[city]).join(' · ')}</p>)}
                 {onDraft && mode === answerMode && !run && <button type="button" className="button secondary"
                   onClick={() => { setExpanded(false); onDraft(answer.draft!, question); }}>Использовать черновик</button>}
               </div>}

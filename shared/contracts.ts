@@ -38,6 +38,7 @@ interface WorkspaceBase {
   buddyMode: 'guide' | 'model';
   buddyProvider?: 'local' | 'remote';
   identity?: DemoIdentity;
+  standFixed?: boolean;
 }
 
 export type DemoIdentityId = 'demo-trainee' | 'demo-trainee-b' | 'demo-mentor';
@@ -118,6 +119,9 @@ export interface Publication {
   conclusion?: string;
   review?: { decision: 'accepted' | 'returned'; comment: string; reviewedAt: string };
   replay?: Run;
+  replayBy?: DemoIdentityId;
+  previous?: { id: string; runId: string; conclusion?: string; review?: Publication['review'] };
+  nextId?: string;
 }
 
 export interface RecordListItem {
@@ -125,6 +129,8 @@ export interface RecordListItem {
   taskId: string;
   publishedAt: string;
   decision: 'accepted' | 'returned' | null;
+  previousId?: string;
+  nextId?: string;
 }
 
 export type DraftCheck = CheckInput | { id: 'price-asc'; expectedOrder: string[] };
@@ -161,5 +167,12 @@ export interface BuddyAnswer {
   fallbackReason?: 'unavailable' | 'invalid-response';
   draft?: CheckDraft;
   facts?: string[];
+  verdicts?: ClaimVerdict[];
+  note?: string;
   escalation?: string;
+}
+
+export interface ClaimVerdict {
+  status: 'confirmed' | 'refuted' | 'unclear';
+  text: string;
 }

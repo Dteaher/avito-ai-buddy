@@ -6,7 +6,7 @@ import { generateReply, ModelResponseError, readProvider, type DialogueMessage, 
 import { priceIntent, priceReplies } from './price-guide.ts';
 import { sortTask } from './price-scenario.ts';
 import { isObject } from './scenario.ts';
-import { draftFor, escalation, guideFeedback, guidePlan, statesRequiredPriceOrder, workflowContract } from './buddy-workflow.ts';
+import { draftFor, escalation, guideFeedback, guidePlan, pricePlanNote, workflowContract } from './buddy-workflow.ts';
 
 const clarificationLifetime = 10 * 60 * 1000;
 const conversationLifetime = 30 * 60 * 1000;
@@ -86,7 +86,7 @@ function planReply(query: string, guide: BuddyAnswer, local: Reply, price: boole
   }
 }
 
-export function createBuddy(env: NodeJS.ProcessEnv) {
+export function createBuddy(env: NodeJS.ProcessEnv, observeModelAttempt?: () => void) {
   const provider = readProvider(env);
   const mode: Workspace['buddyMode'] = provider ? 'model' : 'guide';
   const providerKind: Workspace['buddyProvider'] = provider ? (provider.local ? 'local' : 'remote') : undefined;
@@ -113,7 +113,7 @@ export function createBuddy(env: NodeJS.ProcessEnv) {
       const query = question.toLowerCase().replaceAll('ё', 'е').replace(/\s+/g, ' ');
       const outside = /отгул|отпуск|внутренн.*(?:пароль|ключ)|игнорируй.*(?:инструкц|правил)|системный промпт/.test(query);
       if (requestedMode === 'manual' || outside) return {
-        kind: 'insufficient', mode: 'guide', sources: [], escalation: escalation(task),
+        kind: 'insufficient', mode: 'guide', sources: [], escalation: escalation(task, query),
         text: outside ? 'В тестовой инструкции команды нет сведений по этому вопросу.' : 'Ручной режим включён. Проверь правило в инструкции или уточни вопрос у наставника.',
       };
       if (isActionRequest(query)) return guideAnswer(task, price ? priceReplies.action : replies.action);
@@ -157,20 +157,24 @@ export function createBuddy(env: NodeJS.ProcessEnv) {
             : [checkId === 'without-city' ? 'rule:1' : 'rule:2']);
           const modelEvidence = selectedIds ? new Map([...evidence].filter(([id]) => selectedIds.has(id)
             || id === 'rule:3' || relatedRules?.includes(id))) : evidence;
-          const workflow = intent ? workflowContract(groundingTask, intent, run, answer) : undefined;
+          const workflow = intent ? workflowContract(groundingTask, intent, answer) : undefined;
           const timeout = workflow ? AbortSignal.timeout(provider.timeout) : undefined;
           const modelSignal = signal && timeout ? AbortSignal.any([signal, timeout]) : timeout ?? signal;
-          const generate = () => generateReply(provider, {
-            task: groundingTask, question, evidence: intent ? evidence : modelEvidence, history, followUp: followUp && !history.length ? hints[followUp] : undefined,
-            signal: modelSignal, plan, workflow,
-          });
+          const generate = () => {
+            observeModelAttempt?.();
+            return generateReply(provider, {
+              task: groundingTask, question, evidence: intent ? evidence : modelEvidence,
+              history: intent === 'review' ? [] : history, followUp: followUp && !history.length ? hints[followUp] : undefined,
+              signal: modelSignal, plan, workflow,
+            });
+          };
           const { checkId, reviewClaims, ...generated } = await generate().catch((error: unknown) => {
             if (workflow && error instanceof ModelResponseError && !modelSignal?.aborted) return generate();
             throw error;
           });
           answer = {
             ...(generated.kind === 'feedback' && run ? guideFeedback(run, query, reviewClaims) : generated),
-            ...(checkId === 'price-asc' && answer.kind === 'draft' && statesRequiredPriceOrder(query) ? { text: answer.text } : {}),
+            ...(checkId === 'price-asc' && answer.kind === 'draft' && pricePlanNote(query) ? { text: answer.text } : {}),
             mode: 'model', ...(checkId ? { draft: draftFor(task, checkId) } : {}),
           };
         } catch (error) {
@@ -191,7 +195,7 @@ export function createBuddy(env: NodeJS.ProcessEnv) {
         remember(clarifications, id, { taskId: task.id, owner, scope, expiresAt: Date.now() + clarificationLifetime, topic });
         answer.clarificationId = id;
       }
-      if (answer.kind === 'insufficient' && !needsRun(query)) answer.escalation = escalation(task);
+      if (answer.kind === 'insufficient' && !needsRun(query)) answer.escalation = escalation(task, query);
       return answer;
     },
   };

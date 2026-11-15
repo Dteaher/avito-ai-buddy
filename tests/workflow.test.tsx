@@ -165,6 +165,25 @@ describe('First Check workspace', () => {
     await screen.findByRole('link', { name: /Открыть запись/ });
     expect(mock.mock.calls.some(([url]) => url.endsWith('/buddy'))).toBe(false);
   });
+
+  it('aborts a pending draft on mode change and keeps the new form untouched', async () => {
+    const mock = api({ workspace: { ...workspace, buddyMode: 'model' } });
+    const implementation = mock.getMockImplementation()!;
+    let resolveReply: ((response: Response) => void) | undefined;
+    mock.mockImplementation((url, init) => url.endsWith('/buddy')
+      ? new Promise<Response>((resolve) => { resolveReply = resolve; }) : implementation(url, init));
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole('button', { name: 'Подготовить проверку' }));
+    await user.type(screen.getByRole('textbox', { name: 'Спросить Buddy' }), 'Без фильтра жду Казань{Enter}');
+    await screen.findByText('Buddy отвечает…');
+    const call = mock.mock.calls.find(([url]) => url.endsWith('/buddy'));
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Режим проверки' }), 'guide');
+    expect(call?.[1]?.signal?.aborted).toBe(true);
+    resolveReply?.(Response.json({ ...guidance, kind: 'draft', draft: { checkId: 'without-city', checks: [], path: '/demo/search' } }));
+    expect(screen.queryByRole('button', { name: 'Использовать черновик' })).toBeNull();
+    expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Запустить проверку' }).disabled).toBe(true);
+  });
   it('links the source, compares both responses and publishes after confirmation', async () => {
     const mock = api();
     const user = userEvent.setup();

@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { ArrowDownRight, ArrowLeft, ArrowUpRight, Check, CircleAlert, LoaderCircle, MessageCircle } from 'lucide-react';
 import type { BuddyQuestion, DemoIdentity, Publication, RecordListItem, Run, Workspace as WorkspaceData } from '../shared/contracts';
-import { summarizeRun } from '../shared/run-summary';
+import { sameObservedResult, summarizeRun } from '../shared/run-summary';
 import { errorMessage, post, request } from './api';
 import { Evidence, RunContext, formatTime } from './Evidence';
 import { NextTask, Workspace } from './Workspace';
 import { Buddy, InstructionDialog, showInstruction } from './Buddy';
+import { Conclusion } from './Conclusion';
 
-type Loaded = { workspace: WorkspaceData; publication?: Publication; records?: RecordListItem[] };
+type Loaded = { workspace: WorkspaceData; publication?: Publication; records?: RecordListItem[]; revision?: Publication };
 
 function Header({ identity }: { identity?: DemoIdentity }) {
   const [busy, setBusy] = useState(false);
@@ -48,6 +49,7 @@ export function App() {
   const recordId = /^\/records\/([^/]+)\/?$/.exec(window.location.pathname)?.[1];
   const selectedTask = new URLSearchParams(window.location.search).get('task');
   const showRecords = new URLSearchParams(window.location.search).has('records');
+  const revisionId = new URLSearchParams(window.location.search).get('revise');
   const [data, setData] = useState<Loaded>();
   const [error, setError] = useState('');
   const [attempt, setAttempt] = useState(0);
@@ -74,21 +76,26 @@ export function App() {
         const publication = recordId ? await request<Publication>(`/api/records/${recordId}`, options) : undefined;
         const records = !recordId && (showRecords || workspace.identity?.role === 'mentor')
           ? await request<RecordListItem[]>('/api/records', options) : undefined;
-        if (!controller.signal.aborted) setData({ workspace, publication, records });
+        const revision = !recordId && !records && revisionId
+          ? await request<Publication>(`/api/records/${encodeURIComponent(revisionId)}`, options) : undefined;
+        if (revision && (revision.review?.decision !== 'returned' || revision.nextId || workspace.task.id !== revision.run.task.id)) {
+          throw new Error('Открой возвращённую версию без исправления и выбери повторную проверку.');
+        }
+        if (!controller.signal.aborted) setData({ workspace, publication, records, revision });
       } catch (reason) {
         if (!controller.signal.aborted) setError(errorMessage(reason));
       }
     }
     void open();
     return () => controller.abort();
-  }, [attempt, recordId, selectedTask, showRecords]);
+  }, [attempt, recordId, revisionId, selectedTask, showRecords]);
 
   return (
     <>
       <Header identity={identity} />
       {data?.publication ? <Record publication={data.publication} workspace={data.workspace} mode={mode} />
         : data?.records ? <RecordList records={data.records} mentor={identity?.role === 'mentor'} />
-          : data ? <Workspace key={data.workspace.task.id} data={data.workspace} mode={mode} chooseMode={chooseMode} /> : (
+          : data ? <Workspace key={data.workspace.task.id} data={data.workspace} mode={mode} chooseMode={chooseMode} revision={data.revision} /> : (
         <main className="container initial">
           {error ? (
             <section className="surface startup" role="alert">
@@ -115,8 +122,8 @@ function RecordList({ records, mentor }: { records: RecordListItem[]; mentor: bo
       <section className="surface record-surface record-list" aria-label="Опубликованные проверки">
         {records.length ? <ul>{records.map((record) => (
           <li key={record.id}>
-            <a className="text-link" href={`/records/${record.id}`}>{record.taskId} · {formatTime(record.publishedAt)} <ArrowUpRight size={16} /></a>
-            <span>{record.decision ? reviewLabel[record.decision] : 'Ожидает решения'}</span>
+            <a className="text-link" href={`/records/${record.id}`}>{record.taskId}{record.previousId ? ' · Исправление' : ''} · {formatTime(record.publishedAt)} <ArrowUpRight size={16} /></a>
+            <span>{record.nextId ? 'Есть исправленная версия' : record.decision ? reviewLabel[record.decision] : 'Ожидает решения'}</span>
           </li>
         ))}</ul> : <p>Здесь появятся опубликованные проверки.</p>}
       </section>
@@ -126,13 +133,19 @@ function RecordList({ records, mentor }: { records: RecordListItem[]; mentor: bo
 
 function Record({ publication: initial, workspace, mode }: { publication: Publication; workspace: WorkspaceData; mode?: BuddyQuestion['mode'] }) {
   const [publication, setPublication] = useState(initial);
-  const { id, run, publishedAt, conclusion, review, replay } = publication;
+  const { id, run, publishedAt, conclusion, review, replay, replayBy, previous, nextId } = publication;
   const instruction = useRef<HTMLDialogElement>(null);
   const [comment, setComment] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [replaying, setReplaying] = useState(false);
   const [replayError, setReplayError] = useState('');
+  const [fixed, setFixed] = useState(Boolean(workspace.standFixed));
+  const [switchingStand, setSwitchingStand] = useState(false);
+  const [checkingReplay, setCheckingReplay] = useState(false);
+  const [replayConclusion, setReplayConclusion] = useState(conclusion ?? '');
+  const [editing, setEditing] = useState(false);
+  const [revisedConclusion, setRevisedConclusion] = useState(conclusion ?? '');
   const mentor = workspace.identity?.role === 'mentor';
   const task = run.task;
   const buddyContext = { task, kind: run.kind, buddyMode: workspace.buddyMode, buddyProvider: workspace.buddyProvider };
@@ -142,7 +155,7 @@ function Record({ publication: initial, workspace, mode }: { publication: Public
     setError('');
     try {
       const updated = await post<Publication>(`/api/records/${id}/review`, { decision, comment });
-      setPublication(updated);
+      setPublication((previous) => ({ ...previous, ...updated }));
     } catch (reason) {
       setError(errorMessage(reason));
     } finally {
@@ -154,11 +167,36 @@ function Record({ publication: initial, workspace, mode }: { publication: Public
     setReplayError('');
     try {
       const result = await post<Run>(`/api/records/${id}/replay`);
-      setPublication((previous) => ({ ...previous, replay: result }));
+      setPublication((previous) => ({ ...previous, replay: result, replayBy: workspace.identity?.id }));
+      setCheckingReplay(false);
+      setReplayConclusion(conclusion ?? '');
     } catch (reason) {
       setReplayError(errorMessage(reason));
     } finally {
       setReplaying(false);
+    }
+  }
+  async function changeStand() {
+    setSwitchingStand(true);
+    setReplayError('');
+    try {
+      const state = await post<{ fixed: boolean }>('/api/demo/stand', { fixed: !fixed });
+      setFixed(state.fixed);
+    } catch (reason) {
+      setReplayError(errorMessage(reason));
+    } finally {
+      setSwitchingStand(false);
+    }
+  }
+  async function submitRevision() {
+    setBusy(true);
+    setError('');
+    try {
+      const result = await post<Publication>(`/api/records/${id}/revisions`, { conclusion: revisedConclusion });
+      window.location.assign(result.url);
+    } catch (reason) {
+      setError(errorMessage(reason));
+      setBusy(false);
     }
   }
   return (
@@ -184,22 +222,47 @@ function Record({ publication: initial, workspace, mode }: { publication: Public
             <p>Источник ожидания · {run.preparation ? 'на основе черновика Buddy' : 'ручной ввод'} по инструкции команды.</p>
             {summarizeRun(run).map((fact) => <p className="fact" key={fact}>{fact}</p>)}
             <p className="record-conclusion"><strong>Вывод стажёра</strong>{conclusion || 'Вывод не добавлен.'}</p>
+            {previous && <section className="revision-context" aria-label="Предыдущая версия">
+              <a href={`/records/${previous.id}`} className="text-link">Предыдущая версия <ArrowUpRight size={15} /></a>
+              <p>{previous.runId === run.id ? 'Исправлен вывод. Использован исходный прогон.' : 'Выполнен новый прогон.'}</p>
+              {previous.conclusion && <p className="record-conclusion"><strong>Предыдущий вывод</strong>{previous.conclusion}</p>}
+              {previous.review?.comment && <p className="record-conclusion"><strong>Замечание наставника</strong>{previous.review.comment}</p>}
+            </section>}
+            {nextId && <a href={`/records/${nextId}`} className="text-link">Открыть исправленную версию <ArrowUpRight size={15} /></a>}
           </section>
-          {!mentor && <section className="record-summary" aria-label="Повтор проверки">
-            <button type="button" className="button secondary" disabled={replaying} onClick={() => void repeat()}>
+          <section className="record-summary" aria-label="Повтор проверки">
+            {workspace.identity && <details className="response-details stand-switch">
+              <summary>Демо-стенд · {fixed ? 'исправный ответ' : 'ответ с дефектом'}</summary>
+              <p>Настройка действует на обе задачи в этом локальном запуске.</p>
+              <button type="button" className="button secondary" disabled={switchingStand || replaying} onClick={() => void changeStand()}>
+                {fixed ? 'Вернуть дефект на стенд' : 'Включить исправный ответ'}
+              </button>
+            </details>}
+            <button type="button" className="button secondary" disabled={replaying || switchingStand} onClick={() => void repeat()}>
               {replaying ? 'Повторяем запрос…' : 'Повторить проверку'}
             </button>
             {replayError && <p role="alert" className="action-error">{replayError}</p>}
-            {replay && <div className="replay-summary" aria-live="polite">
+            {replay && <>
+              <p className="replay-state" role="status">
+                <strong>{sameObservedResult(run, replay) ? 'Результат повтора совпал с исходным' : 'Результат повтора изменился'}</strong>
+                {replayBy && <> · {replayBy === 'demo-mentor' ? 'Наставник' : replayBy === 'demo-trainee-b' ? 'Стажёр Б' : 'Стажёр А'}</>}
+              </p>
+              <div id="record-replay" className="replay-summary">
               {[{ title: 'Исходный прогон', run }, { title: 'Последний повтор', run: replay }].map(({ title, run }) => (
                 <div key={run.id}><h3>{title}</h3><time dateTime={run.checkedAt}>{formatTime(run.checkedAt)}</time>
-                  {summarizeRun(run).map((fact) => <p className="fact" key={fact}>{fact}</p>)}
+                  {summarizeRun(run).map((fact, index) => <p className="fact" key={fact}
+                    id={run.id === replay.id ? `record-replay-${run.checks[index].id}` : undefined}>{fact}</p>)}
                 </div>
               ))}
-            </div>}
-          </section>}
+              </div>
+              {!mentor && mode !== 'manual' && !checkingReplay && <button type="button" className="button secondary"
+                onClick={() => setCheckingReplay(true)}>Сверить старый вывод с повтором</button>}
+              {checkingReplay && <Conclusion key={replay.id} run={replay} value={replayConclusion} onChange={setReplayConclusion}
+                label="Вывод для проверки по повтору" mode={mode} openRule={(n) => showInstruction(instruction.current, n)} evidenceAnchor="record-replay" />}
+            </>}
+          </section>
           <RunContext run={run} showRules />
-          <Evidence run={run} />
+          <Evidence run={run} anchorPrefix="result-evidence" />
           {!mentor && run.kind !== 'price-order' && <NextTask />}
         </section>
         <div className="record-sidebar">
@@ -208,7 +271,7 @@ function Record({ publication: initial, workspace, mode }: { publication: Public
             {review ? <div role="status">
               <p><strong>{reviewLabel[review.decision]}</strong> · <time dateTime={review.reviewedAt}>{formatTime(review.reviewedAt)}</time></p>
               {review.comment && <p className="record-conclusion">{review.comment}</p>}
-              {!mentor && <p>{review.decision === 'accepted' ? 'Запись готова для работы команды. Можно перейти к следующей задаче.' : 'Учти комментарий и передай наставнику новую запись с уточнённой проверкой.'}</p>}
+              {!mentor && <p>{review.decision === 'accepted' ? 'Запись готова для работы команды.' : 'Учти комментарий в исправленной версии.'}</p>}
             </div> : mentor ? <>
               <p>Прими запись, если по ней можно воспроизвести проверку или разобраться в описанном дефекте.</p>
               <label htmlFor="mentor-comment">Комментарий наставника</label>
@@ -218,6 +281,19 @@ function Record({ publication: initial, workspace, mode }: { publication: Public
               {busy && <p role="status">Сохраняем решение…</p>}
               {error && <p className="action-error" role="alert">{error}</p>}
             </> : <p role="status">Ожидает решения. Наставник увидит опубликованную запись в своём списке.</p>}
+            {!mentor && review?.decision === 'returned' && !nextId && <>
+              {!editing ? <button type="button" className="button primary" onClick={() => setEditing(true)}>Исправить вывод</button> : <>
+                <Conclusion run={run} value={revisedConclusion} onChange={setRevisedConclusion} mode={mode}
+                  label="Исправленный вывод" openRule={(n) => showInstruction(instruction.current, n)} />
+                <button type="button" className="button primary"
+                  disabled={busy || !revisedConclusion.trim() || revisedConclusion.trim() === conclusion}
+                  onClick={() => void submitRevision()}>{busy ? 'Отправляем…' : 'Отправить исправление'}</button>
+                {error && <p className="action-error" role="alert">{error}</p>}
+              </>}
+              <a className="text-link" href={`/?task=${encodeURIComponent(run.task.id)}&revise=${encodeURIComponent(id)}`}>
+                Изменить ожидание и запустить заново <ArrowUpRight size={15} />
+              </a>
+            </>}
           </section>
           {!mentor && <Buddy workspace={buddyContext} run={run} mode={mode} openSource={(ruleNumber) => showInstruction(instruction.current, ruleNumber)} />}
         </div>

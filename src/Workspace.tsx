@@ -20,17 +20,18 @@ export function NextTask() {
   );
 }
 
-export function Workspace({ data, mode, chooseMode }: {
-  data: WorkspaceData; mode?: BuddyQuestion['mode']; chooseMode: (mode: BuddyQuestion['mode']) => void;
+export function Workspace({ data, mode, chooseMode, revision }: {
+  data: WorkspaceData; mode?: BuddyQuestion['mode']; chooseMode: (mode: BuddyQuestion['mode']) => void; revision?: Publication;
 }) {
   const { task } = data;
   const priceTask = data.kind === 'price-order';
   const taskPath = `/api/tasks/${task.id}`;
-  const [stage, setStage] = useState(0);
-  const [furthest, setFurthest] = useState(0);
-  const [choices, setChoices] = useState<Choices>({});
-  const [order, setOrder] = useState<string[]>([]);
-  const [preparation, setPreparation] = useState<Preparation>();
+  const [stage, setStage] = useState(revision ? 1 : 0);
+  const [furthest, setFurthest] = useState(revision ? 1 : 0);
+  const [choices, setChoices] = useState<Choices>(() => revision && revision.run.kind !== 'price-order'
+    ? Object.fromEntries(revision.run.checks.map(({ id, expectedCities }) => [id, expectedCities])) : {});
+  const [order, setOrder] = useState<string[]>(revision?.run.kind === 'price-order' ? revision.run.checks[0].expectedOrder : []);
+  const [preparation, setPreparation] = useState<Preparation | undefined>(revision?.run.preparation);
   const [conclusion, setConclusion] = useState('');
   const [run, setRun] = useState<Run>();
   const [publication, setPublication] = useState<Publication>();
@@ -119,7 +120,9 @@ export function Workspace({ data, mode, chooseMode }: {
     setBusy(true);
     setFailure('');
     try {
-      setPublication(await post<Publication>(`${taskPath}/runs/${run.id}/publication`, { conclusion }));
+      setPublication(revision
+        ? await post<Publication>(`/api/records/${revision.id}/revisions`, { conclusion, runId: run.id })
+        : await post<Publication>(`${taskPath}/runs/${run.id}/publication`, { conclusion }));
     } catch (error) {
       setFailure(errorMessage(error));
     } finally {
@@ -139,6 +142,8 @@ export function Workspace({ data, mode, chooseMode }: {
         </div>
         <img className="hero-image" src={heroImage} alt="" width="900" height="302" />
       </section>
+      {revision && <p className="revision-context"><a className="text-link" href={revision.url}>Исправляем запись {revision.run.task.id} <ArrowUpRight size={15} /></a>
+        <span>{revision.review?.comment}</span></p>}
 
       <nav className="task-nav" aria-label="Рабочие задачи">
         {data.tasks.map(({ id }) => (
@@ -175,7 +180,7 @@ export function Workspace({ data, mode, chooseMode }: {
       </nav>
 
       <div className="workspace-grid" data-has-result={Boolean(run)}>
-        <Buddy workspace={data} openSource={openSource} run={run} collapsible mode={mode}
+        <Buddy key={mode ?? 'default'} workspace={data} openSource={openSource} run={run} collapsible mode={mode}
           intent={stage === 1 ? 'plan' : undefined} onDraft={busy ? undefined : applyDraft} orderItems={priceTask ? data.orderItems : undefined} />
         <section className="surface work-panel" aria-labelledby="stage-title">
           <span className="visually-hidden" aria-live="polite">
@@ -237,8 +242,8 @@ export function Workspace({ data, mode, chooseMode }: {
               <div className="panel-heading">
                 <h2 id="stage-title" tabIndex={-1} ref={heading}>{stage === 2 || publication ? 'Результат проверки' : 'Предпросмотр'}</h2>
               </div>
-              <div id="result-evidence"><Evidence key={run.id} run={run} animate={animateResult} /></div>
-              {stage === 2 && !publication && <Conclusion key={run.id} run={run} value={conclusion} onChange={setConclusion} openRule={openSource} mode={mode} />}
+              <Evidence key={run.id} run={run} animate={animateResult} anchorPrefix="result-evidence" />
+              {stage === 2 && !publication && <Conclusion key={`${run.id}/${mode}`} run={run} value={conclusion} onChange={setConclusion} openRule={openSource} mode={mode} />}
               {stage === 3 && !publication && conclusion.trim() && <p className="record-conclusion"><strong>Твой вывод</strong>{conclusion}</p>}
               {stage === 3 && <details className="response-details">
                 <summary>Данные записи для трекера · {task.id} <ChevronDown size={17} className="disclosure" /></summary>

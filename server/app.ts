@@ -21,6 +21,7 @@ export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) 
   const app = express();
   app.disable('x-powered-by');
   const cookieName = 'buddy_session';
+  let standFixed = false;
   const sessionLifetime = 30 * 24 * 60 * 60 * 1000;
   const tokenFrom = (req: Request) => req.headers.cookie?.match(/(?:^|;\s*)buddy_session=([0-9a-f]{48})(?:;|$)/)?.[1];
   const identityFrom = (req: Request) => {
@@ -50,7 +51,8 @@ export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) 
     const filters = Object.keys(req.query);
     if (filters.length === 1 && req.query.sort === 'price_asc') {
       // Намеренный дефект: null идёт первым, хотя состав выдачи полный.
-      const items = priceItems.toSorted((a, b) => (a.price ?? -Infinity) - (b.price ?? -Infinity));
+      const nullPrice = standFixed ? Infinity : -Infinity;
+      const items = priceItems.toSorted((a, b) => (a.price ?? nullPrice) - (b.price ?? nullPrice));
       res.json({ items });
       return;
     }
@@ -59,7 +61,7 @@ export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) 
       return;
     }
     // В запросе без фильтра стенд намеренно теряет объявление из Самары.
-    res.json({ items: listings.filter(({ city }) => city === 'kazan') });
+    res.json({ items: standFixed && !filters.length ? listings : listings.filter(({ city }) => city === 'kazan') });
   });
 
   app.use('/api', (_req, res, next) => {
@@ -75,7 +77,7 @@ export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) 
     const existing = identityFrom(req);
     const identity = existing ?? identities[0];
     if (!existing) setSession(res, identity);
-    const context = { tasks: assignedTasks, identity, buddyMode: buddy.mode, buddyProvider: buddy.provider };
+    const context = { tasks: assignedTasks, identity, standFixed, buddyMode: buddy.mode, buddyProvider: buddy.provider };
     const workspace: Workspace = selected === sortTask.id
       ? { ...context, kind: 'price-order', task: sortTask, checks: [priceCheck], orderItems: priceItems }
       : { ...context, task, checks: [...checks] };
@@ -110,6 +112,15 @@ export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) 
     }
     next();
   };
+
+  app.post('/api/demo/stand', (req, res) => {
+    if (typeof req.body?.fixed !== 'boolean') {
+      res.status(400).json({ message: 'Выбери состояние тестового стенда.' });
+      return;
+    }
+    standFixed = req.body.fixed;
+    res.json({ fixed: standFixed });
+  });
 
   app.post('/api/tasks/:taskId/buddy', assignedTask, async (req, res) => {
     const input = parseBuddyQuestion(req.body);
@@ -194,13 +205,42 @@ export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) 
       res.status(404).json({ message: 'Запись не найдена. Проверь ссылку или открой рабочее пространство.' });
       return;
     }
-    if (res.locals.identity.role === 'trainee') record.replay = store.readReplay(record.id, res.locals.identity.id);
-    res.json(record);
+    res.json({ ...record, ...store.readReplay(record.id, assignedTrainee(res.locals.identity.id)) });
+  });
+
+  app.post('/api/records/:id/revisions', (req, res) => {
+    const identity: DemoIdentity = res.locals.identity;
+    const previous = identity.role === 'trainee' ? store.readRecord(req.params.id, identity.id) : undefined;
+    if (!previous) {
+      res.status(404).json({ message: 'Запись недоступна для исправления.' });
+      return;
+    }
+    const { conclusion, runId = previous.run.id } = req.body ?? {};
+    if (typeof conclusion !== 'string' || conclusion.length > 1000 || typeof runId !== 'string'
+      || (!conclusion.trim() && runId === previous.run.id)) {
+      res.status(400).json({ message: 'Укажи исправленный вывод до 1000 символов.' });
+      return;
+    }
+    if (previous.review?.decision !== 'returned' || (runId === previous.run.id && conclusion.trim() === (previous.conclusion ?? ''))) {
+      res.status(409).json({ message: 'Для новой версии нужна возвращённая запись и изменение вывода или прогона.' });
+      return;
+    }
+    if (!store.readRun(runId, identity.id, previous.run.task.id)) {
+      res.status(404).json({ message: 'Прогон недоступен в этой задаче.' });
+      return;
+    }
+    const { record, created } = store.revise(previous, identity.id, runId, conclusion.trim());
+    if (!record) {
+      res.status(409).json({ message: 'Версия или публикация уже существует. Обнови запись.' });
+      return;
+    }
+    res.status(created ? 201 : 200).json(record);
   });
 
   app.post('/api/records/:id/replay', async (req, res) => {
     const identity: DemoIdentity = res.locals.identity;
-    const record = identity.role === 'trainee' ? store.readRecord(req.params.id, identity.id) : undefined;
+    const owner = assignedTrainee(identity.id);
+    const record = store.readRecord(req.params.id, owner);
     if (!record) {
       res.status(404).json({ message: 'Запись недоступна для повторной проверки.' });
       return;
@@ -222,7 +262,7 @@ export function createApp({ store, standOrigin, buddy, staticDir }: AppOptions) 
       return;
     }
     replay.preparation = original.preparation;
-    store.saveReplay(record.id, replay, identity.id);
+    store.saveReplay(record.id, replay, owner, identity.id);
     res.status(201).json(replay);
   });
 
