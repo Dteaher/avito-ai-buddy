@@ -11,6 +11,8 @@ export function findIdentity(id: unknown) {
   return identities.find((identity) => identity.id === id);
 }
 
+export const authoringTrainees = identities.filter(({ role }) => role === 'trainee');
+
 export function assignedTrainee(id: DemoIdentityId) {
   return id === 'demo-mentor' ? trainee : id;
 }

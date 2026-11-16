@@ -3,11 +3,12 @@ import { ArrowDownRight, ArrowLeft, ArrowUpRight, Check, CircleAlert, LoaderCirc
 import type { AssignmentOffer, BuddyQuestion, DemoIdentity, Publication, RecordListItem, Run, Task, TrackerDelivery, Workspace as WorkspaceData } from '../shared/contracts';
 import { responseFollowsRule, responseMatchesExpectation, sameObservedResult, standLabel, summarizeRun } from '../shared/run-summary';
 import { errorMessage, post, request } from './api';
-import { Evidence, RunContext, formatTime } from './Evidence';
+import { Evidence, RunContext, formatTime, openResponse } from './Evidence';
 import { NextTask, Workspace } from './Workspace';
 import { Buddy, InstructionDialog, showInstruction } from './Buddy';
 import { Conclusion } from './Conclusion';
 import { AttemptTrail } from './AttemptTrail';
+import { CoachingTrace } from './CoachingCard';
 import { CopyEvidence } from './CopyEvidence';
 import { TaskEditor } from './TaskEditor';
 
@@ -21,8 +22,14 @@ function Header({ identity }: { identity?: DemoIdentity }) {
     setBusy(true);
     setError('');
     try {
-      await post('/api/session', { identity: value });
-      window.location.reload();
+      const next = await post<DemoIdentity>('/api/session', { identity: value });
+      if (window.location.pathname === '/' && next.role === 'mentor') {
+        window.location.assign('/?records=1');
+      } else if (window.location.pathname === '/' && identity?.role === 'mentor') {
+        window.location.assign('/');
+      } else {
+        window.location.reload();
+      }
     } catch (reason) {
       setError(errorMessage(reason));
       setBusy(false);
@@ -53,6 +60,8 @@ export function App() {
   const selectedTask = new URLSearchParams(window.location.search).get('task');
   const showRecords = new URLSearchParams(window.location.search).has('records');
   const showEditor = new URLSearchParams(window.location.search).has('editor');
+  const editorProject = new URLSearchParams(window.location.search).get('project');
+  const editorVersion = new URLSearchParams(window.location.search).get('version');
   const revisionId = new URLSearchParams(window.location.search).get('revise');
   const [data, setData] = useState<Loaded>();
   const [error, setError] = useState('');
@@ -87,7 +96,17 @@ export function App() {
         }
         if (!controller.signal.aborted) setData({ workspace, publication, records, revision });
       } catch (reason) {
-        if (!controller.signal.aborted) setError(errorMessage(reason));
+        if (controller.signal.aborted) return;
+        if (!recordId && selectedTask) {
+          const workspace = await request<WorkspaceData>('/api/workspace', options).catch(() => undefined);
+          if (controller.signal.aborted) return;
+          setIdentity(workspace?.identity);
+          if (workspace?.identity?.role === 'mentor') {
+            window.location.replace('/?records=1');
+            return;
+          }
+        }
+        setError(errorMessage(reason));
       }
     }
     void open();
@@ -98,7 +117,7 @@ export function App() {
     <>
       <Header identity={identity} />
       {data?.publication ? <Record publication={data.publication} workspace={data.workspace} mode={mode} />
-        : data?.records && showEditor && identity?.role === 'mentor' ? <TaskEditor />
+        : data?.records && showEditor && identity?.role === 'mentor' ? <TaskEditor initialProject={editorProject} initialVersion={editorVersion} />
         : data?.records ? <RecordList records={data.records} mentor={identity?.role === 'mentor'} offers={data.workspace.assignmentOffers} />
           : data ? <Workspace key={data.workspace.task.id} data={data.workspace} mode={mode} chooseMode={chooseMode} revision={data.revision} /> : (
         <main className="container initial">
@@ -106,7 +125,7 @@ export function App() {
             <section className="surface startup" role="alert">
               <CircleAlert aria-hidden="true" /><h1>Не удалось открыть страницу</h1><p>{error}</p>
               <button className="button primary" onClick={() => { setError(''); setAttempt(attempt + 1); }}>Повторить</button>
-              {recordId && <a className="text-link" href="/">К рабочему пространству <ArrowUpRight size={16} /></a>}
+              {(recordId || selectedTask) && <a className="text-link" href="/">К рабочему пространству <ArrowUpRight size={16} /></a>}
             </section>
           ) : <p className="loading" role="status"><LoaderCircle size={20} className="spinner" /> Загружаем {recordId ? 'запись' : 'задачу'}…</p>}
         </main>
@@ -148,7 +167,7 @@ function RecordList({ records, mentor, offers = [] }: { records: RecordListItem[
       {!mentor && <a href="/" className="text-link back-link"><ArrowLeft size={17} /> К рабочему пространству</a>}
       <h1>{mentor ? 'Записи на ревью' : 'Мои записи'}</h1>
       {mentor && <div className="mentor-heading-actions">
-        <p>Записи назначенного тебе стажёра А.</p>
+        <p>Проверки стажёров по назначенным поручениям.</p>
         <a href="/?editor=1" className="button primary">Создать поручение <ArrowUpRight size={17} /></a>
       </div>}
       {mentor && offers.length > 0 && <section id="assignment-offer" className="surface record-surface assignment-catalog" aria-labelledby="assignment-title">
@@ -173,7 +192,7 @@ function RecordList({ records, mentor, offers = [] }: { records: RecordListItem[
       <section className="surface record-surface record-list" aria-label="Опубликованные проверки">
         {records.length ? <ul>{records.map((record) => (
           <li key={record.id}>
-            <a className="text-link" href={`/records/${record.id}`}>{record.taskId.startsWith('TASK-') ? record.title ?? 'Поручение наставника' : record.taskId}{record.previousId ? ' · Исправление' : ''} · {formatTime(record.publishedAt)} <ArrowUpRight size={16} /></a>
+            <a className="text-link" href={`/records/${record.id}`}>{record.taskId.startsWith('TASK-') ? record.title ?? 'Поручение наставника' : record.taskId}{record.previousId ? ' · Исправление' : ''}{record.traineeName && ` · ${record.traineeName}`} · {formatTime(record.publishedAt)} <ArrowUpRight size={16} /></a>
             <span>{record.nextId ? 'Есть исправленная версия' : recordStatus(record.decision, record.trackerStatus)}</span>
           </li>
         ))}</ul> : <p>Здесь появятся опубликованные проверки.</p>}
@@ -208,8 +227,7 @@ function Record({ publication: initial, workspace, mode }: { publication: Public
   const canRevise = !mentor && review?.decision === 'returned' && !nextId;
 
   function openOriginal() {
-    const source = document.getElementById(`result-evidence-${run.checks[0].id}`);
-    source?.querySelectorAll('details').forEach((detail) => { detail.open = true; });
+    const source = openResponse(`result-evidence-${run.checks[0].id}`);
     source?.querySelector('summary')?.focus({ preventScroll: true });
     source?.scrollIntoView({ block: 'start' });
   }
@@ -282,7 +300,7 @@ function Record({ publication: initial, workspace, mode }: { publication: Public
       <div className="record-hero">
         <span className="task-key">{task.authoringId ? `Поручение · v${task.instruction.version}` : task.id}</span>
         <h1>Запись проверки</h1>
-        <p>{run.task.title}</p>
+        <p>{run.task.title}{publication.traineeName && ` · ${publication.traineeName}`}</p>
       </div>
       {!mentor && mode !== 'manual' && <a href="#buddy-title" className="text-link record-discuss"><MessageCircle size={17} /> Обсудить запись с Buddy</a>}
       <div className="workspace-grid">
@@ -309,6 +327,9 @@ function Record({ publication: initial, workspace, mode }: { publication: Public
             {mentor && <div className="record-source-actions">
               <button type="button" className="text-link" onClick={() => showInstruction(instruction.current)}>Открыть правило</button>
               <button type="button" className="text-link" onClick={openOriginal}>Открыть исходный ответ</button>
+              {task.authoringId && <a className="text-link" href={`/?editor=1&project=${encodeURIComponent(task.authoringId)}&version=${encodeURIComponent(task.id)}`}>
+                Открыть поручение и вопросы <ArrowUpRight size={15} />
+              </a>}
             </div>}
           </section>
           <section className="record-summary" aria-label="Резюме проверки">
@@ -328,6 +349,8 @@ function Record({ publication: initial, workspace, mode }: { publication: Public
             <CopyEvidence publication={publication} />
           </section>
           <AttemptTrail run={run} openRule={(n) => showInstruction(instruction.current, n)} />
+          <CoachingTrace before={run.attempt?.coaching} after={publication.coaching} conclusion={conclusion}
+            openRule={(n) => showInstruction(instruction.current, n)} />
           <section className="record-summary" aria-label="Повтор проверки">
             {mentor ? <details className="response-details stand-switch">
               <summary>Демо-стенд · {fixed ? 'исправный ответ' : 'ответ с дефектом'}</summary>

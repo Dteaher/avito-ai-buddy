@@ -68,13 +68,25 @@ async function prepare(user: ReturnType<typeof userEvent.setup>) {
 }
 
 describe('First Check workspace', () => {
+  it('keeps the demo role switch available when a task link is forbidden for the current trainee', async () => {
+    const identity = { id: 'demo-trainee-b', role: 'trainee', name: 'Стажёр Б' } as const;
+    vi.stubGlobal('fetch', async (url: string) => url === '/api/workspace'
+      ? Response.json({ ...workspace, identity })
+      : Response.json({ message: 'Задача недоступна в этой сессии.' }, { status: 404 }));
+    window.history.replaceState(null, '', '/?task=ACTIVE-01');
+    render(<App />);
+    const error = await screen.findByRole('alert');
+    expect(screen.getByRole<HTMLSelectElement>('combobox', { name: 'Демо-вход' }).value).toBe(identity.id);
+    expect(within(error).getByRole('link', { name: 'К рабочему пространству' }).getAttribute('href')).toBe('/');
+  });
+
   it('reopens a mentor draft and assigns the exact published version shown in preview', async () => {
     const user = userEvent.setup();
     const mentor = { id: 'demo-mentor', role: 'mentor', name: 'Наставник' } as const;
     const trainee = { id: 'demo-trainee', role: 'trainee', name: 'Стажёр А' } as const;
     const input = { title: 'Снимок индекса', description: 'Проверить выгрузку.', criterion: 'ID товаров уникальны.', checkIds: ['reindex-active'] as const };
     const saved = { id: 'project', draft: { input, revision: 'draft-r1' }, versions: [] };
-    const version = { version: 1, input, assigned: false, task: { ...task, id: 'project-v1', title: input.title,
+    const version = { version: 1, input, participants: [], task: { ...task, id: 'project-v1', title: input.title,
       instruction: { ...task.instruction, version: '1.0' } } };
     let projects: object[] = [saved];
     const mock = vi.fn<(url: string, init?: RequestInit) => Promise<Response>>(async (url) => {
@@ -85,7 +97,7 @@ describe('First Check workspace', () => {
         return Response.json(version.task);
       }
       if (url === '/api/assignments') {
-        projects = [{ id: 'project', versions: [{ ...version, assigned: true }] }];
+        projects = [{ id: 'project', versions: [{ ...version, participants: [{ traineeId: trainee.id, started: false, clarification: null }] }] }];
         return Response.json({ task: version.task, traineeId: trainee.id });
       }
       return Response.json({ projects, trainees: [trainee], catalog: [{
@@ -99,12 +111,37 @@ describe('First Check workspace', () => {
     expect(screen.getByRole<HTMLTextAreaElement>('textbox', { name: 'Критерий успеха' }).value).toBe(input.criterion);
     expect(within(screen.getByRole('region', { name: 'Предпросмотр стажёра' })).getByText(/ID товаров уникальны$/, { selector: 'li' })).toBeTruthy();
     await user.click(screen.getByRole('button', { name: 'Опубликовать версию' }));
-    await user.click(await screen.findByRole('button', { name: 'Назначить версию 1.0' }));
+    await user.click(await screen.findByRole('button', { name: 'Назначить версию 1.0 — Стажёр А' }));
     expect(await screen.findByText('Назначено · Стажёр А')).toBeTruthy();
     const publish = mock.mock.calls.find(([url]) => url.endsWith('/publish'));
     const assignment = mock.mock.calls.find(([url]) => url === '/api/assignments');
     expect(JSON.parse(String(publish?.[1]?.body))).toEqual({ revision: 'draft-r1' });
     expect(JSON.parse(String(assignment?.[1]?.body))).toEqual({ versionId: 'project-v1', traineeId: trainee.id });
+  });
+
+  it('groups questions by section and compares versions for the same trainees', async () => {
+    const user = userEvent.setup();
+    const mentor = { id: 'demo-mentor', role: 'mentor', name: 'Наставник' };
+    const trainees = [{ id: 'demo-trainee', role: 'trainee', name: 'Стажёр А' }, { id: 'demo-trainee-b', role: 'trainee', name: 'Стажёр Б' }];
+    const input = { title: 'Снимок индекса', description: 'Проверь выгрузку.', criterion: 'ID товаров уникальны.', checkIds: ['reindex-active'] };
+    const makeVersion = (version: number, questions: string[]) => ({
+      version, input, task: { ...task, id: `project-v${version}`, instruction: { ...task.instruction, version: `${version}.0` } },
+      participants: trainees.map(({ id }, index) => ({ traineeId: id, started: true,
+        clarification: questions[index] ? { section: 'criterion', text: questions[index] } : null })),
+    });
+    const questions = ['Сравнивать по ID?', 'Две строки с одним ID — это дубль?'];
+    vi.stubGlobal('fetch', async (url: string) => Response.json(url === '/api/workspace' ? { ...workspace, identity: mentor }
+      : url === '/api/records' ? [] : { projects: [{ id: 'project', versions: [makeVersion(2, []), makeVersion(1, questions)] }], trainees, catalog: [] }));
+    window.history.replaceState(null, '', '/?editor=1&project=project');
+    render(<App />);
+    const report = await screen.findByRole('region', { name: 'Понятность поручения' });
+    expect(within(report).getByText('2 из 2')).toBeTruthy();
+    expect(within(report).getByText('0 из 2')).toBeTruthy();
+    expect(within(report).getByText('−100 п.п.')).toBeTruthy();
+    expect(within(report).getByText('2 вопроса')).toBeTruthy();
+    expect(within(report).getByText(questions[1])).toBeTruthy();
+    await user.click(within(report).getByRole('button', { name: 'Уточнить в черновике' }));
+    expect(document.activeElement).toBe(screen.getByRole('textbox', { name: 'Критерий успеха' }));
   });
 
   it('connects the positions of a priced listing when the no-price listing stays put', () => {

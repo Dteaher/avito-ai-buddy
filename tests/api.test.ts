@@ -81,6 +81,25 @@ describe('SEARCH-01 over HTTP', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it('answers greetings without fetching the model, citing task rules or counting a hint', async () => {
+    await stop();
+    await start({ BUDDY_BASE_URL: 'http://127.0.0.1:1', BUDDY_MODEL: 'model-unavailable' });
+    const mentor = await signIn('demo-mentor');
+    await post('/api/assignments', { templateId: 'ACTIVE-01', traineeId: 'demo-trainee' }, mentor);
+    const active = '/api/tasks/ACTIVE-01';
+    const { attemptId } = await (await get('/api/workspace?task=ACTIVE-01')).json();
+    const greeting = { kind: 'guidance', mode: 'guide', text: expect.stringMatching(/^Привет!/), sources: [] };
+    expect(await (await post(task + '/buddy', { question: 'привет' })).json()).toMatchObject(greeting);
+    expect(await (await post(active + '/buddy', { question: 'Привет, Buddy!', intent: 'plan', attemptId })).json()).toMatchObject(greeting);
+    const choice = { attemptId, checkId: 'active-only', checks: [
+      { id: 'active-only', expectedCities: ['active'] }, { id: 'all-statuses', expectedCities: ['active', 'archived'] },
+    ] };
+    expect((await post(active + '/attempt', choice)).status).toBe(200);
+    expect(await (await post(active + '/runs', choice)).json()).toMatchObject({ attempt: { help: 'none' } });
+    const compound = await (await post(task + '/buddy', { question: 'Привет! Что вернёт фильтр по Казани?', mode: 'guide' })).json();
+    expect(compound.sources).not.toHaveLength(0);
+  });
+
   it('publishes immutable mentor versions and delivers a duplicate-ID finding through the real tracker', async () => {
     const trackerPath = join(dir, 'authoring-tracker.sqlite');
     const tracker = createTrackerService(trackerPath, 'authoring-test');
@@ -123,7 +142,7 @@ describe('SEARCH-01 over HTTP', () => {
       const first = await published.json();
       expect((await publish(complete.revision)).status).toBe(200);
       const assignment = (versionId: string, traineeId = 'demo-trainee') => post('/api/assignments', { versionId, traineeId }, mentor);
-      expect((await assignment(first.id, 'demo-trainee-b')).status).toBe(400);
+      expect((await assignment(first.id, 'demo-mentor')).status).toBe(400);
       const retries = await Promise.all([assignment(first.id), assignment(first.id)]);
       expect(retries.map(({ status }) => status).sort()).toEqual([200, 201]);
 
@@ -132,7 +151,16 @@ describe('SEARCH-01 over HTTP', () => {
       expect((await get(view, other)).status).toBe(404);
       expect((await get(taskPath + '/instruction', other)).status).toBe(404);
       expect((await get('/demo/inventory/reindex', other)).status).toBe(404);
+      const clarificationPath = taskPath + '/clarification';
+      const clarification = { section: 'criterion', text: 'Считать ли дублем две строки с одним ID?' };
+      expect((await post(clarificationPath, clarification, other)).status).toBe(404);
+      expect((await post(clarificationPath, { ...clarification, versionId: 'another-version' })).status).toBe(400);
+      const firstQuestion = { section: 'checks', text: 'Какой запрос выбрать?' };
+      expect(await (await post(clarificationPath, firstQuestion)).json()).toEqual(firstQuestion);
+      expect(await (await post(clarificationPath, { ...clarification, text: ` ${clarification.text} ` })).json()).toEqual(clarification);
+      expect(await (await post(clarificationPath, clarification)).json()).toEqual(clarification);
       const workspace = await (await get(view)).json();
+      expect(workspace.clarification).toEqual(clarification);
       const selected = { attemptId: workspace.attemptId, checkId: 'reindex-active',
         checks: [{ id: 'reindex-active', expectedCities: ['active'], expectedUniqueIds: true }] };
       expect((await post(taskPath + '/attempt', selected)).status).toBe(200);
@@ -187,11 +215,106 @@ describe('SEARCH-01 over HTTP', () => {
         run: result, conclusion, tracker: recovered, review: { decision: 'accepted' },
       });
       expect(await (await get(editor, mentor)).json()).toMatchObject({
-        projects: [{ versions: [{ task: second, assigned: true }, { task: first, assigned: true }] }],
+        projects: [{ versions: [{ task: second, participants: [{ traineeId: 'demo-trainee', started: false, clarification: null }] },
+          { task: first, participants: [{ traineeId: 'demo-trainee', started: true, clarification }] }] }],
       });
     } finally {
       await Promise.all([proxy, trackerServer].map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
       tracker.close();
+    }
+  });
+
+  it('collects one question per assigned trainee and version, and lets the author review both trainees’ work', async () => {
+    const mentor = await signIn('demo-mentor');
+    const other = await signIn('demo-trainee-b');
+    const editor = '/api/mentor/tasks';
+    const input = { title: 'Выгрузка', description: 'Проверь индекс.', criterion: 'ID уникальны.', checkIds: ['reindex-active'] };
+    const { id, draft } = await (await post(editor, input, mentor)).json();
+    const first = await (await post(`${editor}/${id}/publish`, { revision: draft.revision }, mentor)).json();
+    const assign = (versionId: string, traineeId: string) => post('/api/assignments', { versionId, traineeId }, mentor);
+    const firstPath = `/api/tasks/${first.id}`;
+    const firstNote = { section: 'criterion', text: 'Повторы считаются по ID?' };
+    const secondNote = { section: 'criterion', text: 'Считать дублем разные товары с одинаковым ID?' };
+    expect((await post(`${firstPath}/clarification`, secondNote, other)).status).toBe(404);
+    expect((await assign(first.id, 'demo-trainee')).status).toBe(201);
+    expect((await assign(first.id, 'demo-trainee-b')).status).toBe(201);
+    expect((await post('/api/assignments', { templateId: 'ACTIVE-01', traineeId: 'demo-trainee-b' }, mentor)).status).toBe(400);
+    expect(await (await post(`${firstPath}/clarification`, firstNote)).json()).toEqual(firstNote);
+    expect(await (await post(`${firstPath}/clarification`, secondNote, other)).json()).toEqual(secondNote);
+    expect(await (await get(`/api/workspace?task=${first.id}`, other)).json()).toMatchObject({ clarification: secondNote });
+    const nextDraft = await (await post(`${editor}/${id}/draft`, {
+      ...input, criterion: 'Две строки с одним ID считаются дублем.', basedOn: '1',
+    }, mentor)).json();
+    const second = await (await post(`${editor}/${id}/publish`, { revision: nextDraft.revision }, mentor)).json();
+    await assign(second.id, 'demo-trainee');
+    await assign(second.id, 'demo-trainee-b');
+    const secondPath = `/api/tasks/${second.id}`;
+    const { attemptId } = await (await get(`/api/workspace?task=${second.id}`, other)).json();
+    const selected = { attemptId, checkId: 'reindex-active',
+      checks: [{ id: 'reindex-active', expectedCities: ['active'], expectedUniqueIds: true }] };
+    const result = await (await post(`${secondPath}/runs`, selected, other)).json();
+    const record = await (await post(`${secondPath}/runs/${result.id}/publication`, { conclusion: 'Повторяется sku-401.' }, other)).json();
+    const recordPath = `/api/records/${record.id}`;
+    expect((await get(recordPath)).status).toBe(404);
+    expect(await (await get('/api/records', mentor)).json()).toEqual(expect.arrayContaining([expect.objectContaining({ id: record.id, traineeName: 'Стажёр Б' })]));
+    expect((await post(`${recordPath}/replay`, {}, mentor)).status).toBe(201);
+    expect((await post(`${recordPath}/review`, { decision: 'accepted' }, mentor)).status).toBe(200);
+    expect(await (await get(recordPath, mentor)).json()).toMatchObject({ traineeName: 'Стажёр Б', replayBy: 'demo-mentor', review: { decision: 'accepted' } });
+    expect(await (await get(editor, mentor)).json()).toMatchObject({ projects: [{ versions: [
+      { task: second, participants: [{ traineeId: 'demo-trainee', started: false, clarification: null },
+        { traineeId: 'demo-trainee-b', started: true, clarification: null }] },
+      { task: first, participants: [{ traineeId: 'demo-trainee', started: true, clarification: firstNote },
+        { traineeId: 'demo-trainee-b', started: true, clarification: secondNote }] },
+    ] }] });
+  });
+
+  it('previews a Buddy rewrite using the mentor’s explanation without forwarding trainee questions or editing the draft', async () => {
+    let modelInput = '';
+    const text = 'Две строки с одинаковым ID считаются дублем.';
+    const provider = createServer(async (req, res) => {
+      for await (const chunk of req) modelInput += String(chunk);
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ text: `Критерий успеха: ${text}` }) } }] }));
+    });
+    try {
+      const providerUrl = await listen(provider);
+      await stop();
+      await start({ BUDDY_BASE_URL: providerUrl, BUDDY_MODEL: 'fixture-model' });
+      const mentor = await signIn('demo-mentor');
+      const editor = '/api/mentor/tasks';
+      const input = { title: 'Снимок индекса', description: 'Проверь выгрузку.', criterion: 'ID уникальны.', checkIds: ['reindex-active'] };
+      const { id, draft } = await (await post(editor, input, mentor)).json();
+      const first = await (await post(`${editor}/${id}/publish`, { revision: draft.revision }, mentor)).json();
+      await post('/api/assignments', { versionId: first.id, traineeId: 'demo-trainee' }, mentor);
+      await post(`/api/tasks/${first.id}/clarification`, { section: 'criterion', text: 'PRIVATE-QUESTION' });
+      const body = { versionId: first.id, section: 'criterion', meaning: 'Сравниваем ID строк', input };
+      const path = `${editor}/${id}/clarification-suggestion`;
+      expect((await post(path, body)).status).toBe(403);
+      expect((await post(path, { ...body, versionId: 'outside' }, mentor)).status).toBe(404);
+      expect(await (await post(path, body, mentor)).json()).toEqual({ text });
+      expect(modelInput).toContain('Сравниваем ID строк');
+      expect(modelInput).toContain('/demo/inventory/reindex');
+      expect(modelInput).not.toContain('PRIVATE-QUESTION');
+      const data = await (await get(editor, mentor)).json();
+      expect(data.canSuggest).toBe(true);
+      expect(data.projects[0].draft).toBeUndefined();
+      expect(data.projects[0].versions[0].input).toEqual(input);
+
+      const other = await signIn('demo-trainee-b');
+      await post('/api/assignments', { versionId: first.id, traineeId: 'demo-trainee-b' }, mentor);
+      await post(`/api/tasks/${first.id}/clarification`, { section: 'criterion', text: 'SECOND-PRIVATE-QUESTION' }, other);
+      for (const session of [cookie, other]) {
+        const { attemptId } = await (await get(`/api/workspace?task=${first.id}`, session)).json();
+        expect((await post(`/api/tasks/${first.id}/attempt`, { attemptId, checkId: 'reindex-active',
+          checks: [{ id: 'reindex-active', expectedCities: ['active'], expectedUniqueIds: false }] }, session)).status).toBe(200);
+      }
+      modelInput = '';
+      expect(await (await post(path, { ...body, meaning: '' }, mentor)).json()).toEqual({ text });
+      expect(modelInput).toContain('2 стажёра');
+      expect(modelInput).toContain('пунктом 1');
+      expect(modelInput).not.toContain('PRIVATE-QUESTION');
+    } finally {
+      await new Promise<void>((resolve) => provider.close(() => resolve()));
     }
   });
 
@@ -265,6 +388,76 @@ describe('SEARCH-01 over HTTP', () => {
     } finally {
       await Promise.all([proxy, trackerServer].map((listener) => new Promise<void>((resolve) => listener.close(() => resolve()))));
       service.close();
+    }
+  });
+
+  it('coaches the first choice and the interpretation of evidence, then freezes both in the review record', async () => {
+    const questions = ['Какой из двух запросов проверяет именно фильтр?', 'Что ты видишь в составе ответа с фильтром?'];
+    const replies = [
+      { topic: 'query', question: questions[0], explanation: 'Сравни назначение контрольного и диагностического запросов.' },
+      { topic: 'interpretation', question: questions[1], explanation: 'Сопоставь состав ответа с ожидаемой группой товаров.' },
+    ];
+    let calls = 0;
+    const requests: string[] = [];
+    const provider = createServer(async (req, res) => {
+      let payload = '';
+      for await (const chunk of req) payload += String(chunk);
+      requests.push(payload);
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(replies[calls++] ?? {
+        topic: 'unsupported', question: 'Проверь другой сервис?', explanation: 'Открой внешний сервис.',
+      }) } }] }));
+    });
+    const providerUrl = await listen(provider);
+    const env = { BUDDY_BASE_URL: providerUrl, BUDDY_MODEL: 'test-coach' };
+    let providerClosed = false;
+    try {
+      await stop();
+      await start(env);
+      const mentor = await signIn('demo-mentor');
+      const other = await signIn('demo-trainee-b');
+      const path = '/api/tasks/ACTIVE-01';
+      const coach = path + '/coaching';
+      await post('/api/assignments', { templateId: 'ACTIVE-01', traineeId: 'demo-trainee' }, mentor);
+      const { attemptId } = await (await get('/api/workspace?task=ACTIVE-01')).json();
+      const checks = [{ id: 'active-only', expectedCities: ['active'] }, { id: 'all-statuses', expectedCities: ['active', 'archived'] }];
+      expect((await post(coach, { attemptId })).status).toBe(409);
+      expect((await post(coach, { attemptId }, other)).status).toBe(404);
+      expect((await post(path + '/attempt', { attemptId, checkId: 'all-statuses', checks })).status).toBe(200);
+      expect((await post(coach, { attemptId, checkId: 'active-only' })).status).toBe(400);
+      const before = await (await post(coach, { attemptId })).json();
+      expect(before).toMatchObject({ mode: 'model', topic: 'query', question: questions[0], draft: { checkId: 'active-only', checks } });
+      expect(before.fact).toContain('Без фильтра');
+
+      const run = await (await post(path + '/runs', { attemptId, checkId: 'active-only', checks })).json();
+      expect(run.attempt).toMatchObject({ first: { checkId: 'all-statuses' }, final: { checkId: 'active-only' },
+        help: 'after-choice', coaching: before });
+      expect((await post(coach, { runId: run.id }, other)).status).toBe(404);
+      const initial = 'Фильтр status=active работает правильно.';
+      const after = await (await post(coach, { runId: run.id, conclusion: initial })).json();
+      expect(after).toMatchObject({ mode: 'model', topic: 'interpretation', question: questions[1],
+        sources: expect.arrayContaining([expect.objectContaining({ runId: run.id, checkId: 'active-only' })]) });
+      expect(after.fact).toContain('sku-302');
+      const conclusion = 'При status=active в ответе есть архивный товар.';
+      const fallback = await (await post(coach, { runId: run.id, conclusion })).json();
+      expect(fallback).toMatchObject({ mode: 'guide-fallback', topic: 'evidence', fallbackReason: 'invalid-response' });
+      expect(calls).toBe(3);
+      expect(requests[0]).toContain('before-run');
+      expect(requests[1]).toContain(initial);
+      const record = await (await post(path + '/runs/' + run.id + '/publication', { conclusion })).json();
+      const coachedConclusion = { conclusion, note: fallback, initial: { conclusion: initial, note: after } };
+      expect(record).toMatchObject({ coaching: coachedConclusion, conclusion });
+
+      await new Promise<void>((resolve) => provider.close(() => resolve()));
+      providerClosed = true;
+      expect(await (await post(coach, { runId: run.id, conclusion: initial })).json())
+        .toMatchObject({ mode: 'guide-fallback', topic: 'interpretation', fallbackReason: 'unavailable' });
+      await stop();
+      await start(env);
+      const reloaded = await (await get('/api/records/' + record.id, mentor)).json();
+      expect(reloaded).toMatchObject({ coaching: coachedConclusion, run: { attempt: { coaching: before } } });
+    } finally {
+      if (!providerClosed) await new Promise<void>((resolve) => provider.close(() => resolve()));
     }
   });
 

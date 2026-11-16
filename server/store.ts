@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import type { AttemptChoice, DemoIdentityId, Publication, Run, Task, TrackerDelivery } from '../shared/contracts.ts';
+import type { AttemptChoice, CoachedConclusion, CoachingReply, DemoIdentityId, Publication, Run, Task, TrackerDelivery } from '../shared/contracts.ts';
 
 export function createStore(path: string) {
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
@@ -51,6 +51,10 @@ export function createStore(path: string) {
       state TEXT NOT NULL DEFAULT 'open',
       FOREIGN KEY(task_id, trainee) REFERENCES assignments(task_id, trainee)
     );
+    CREATE TABLE IF NOT EXISTS run_coaching (
+      run_id TEXT PRIMARY KEY REFERENCES runs(id),
+      note TEXT NOT NULL
+    );
   `);
   db.exec('PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE');
   try {
@@ -78,6 +82,10 @@ export function createStore(path: string) {
     if (!recordColumns.includes('tracker_status')) {
       db.exec('ALTER TABLE records ADD COLUMN tracker_status TEXT; ALTER TABLE records ADD COLUMN tracker_id TEXT');
     }
+    if (!recordColumns.includes('coaching')) db.exec('ALTER TABLE records ADD COLUMN coaching TEXT');
+    if (!db.prepare('PRAGMA table_info(attempts)').all().some(({ name }) => name === 'coaching')) {
+      db.exec('ALTER TABLE attempts ADD COLUMN coaching TEXT');
+    }
     db.exec('COMMIT');
   } catch (error) {
     db.exec('ROLLBACK');
@@ -86,35 +94,57 @@ export function createStore(path: string) {
     db.exec('PRAGMA foreign_keys = ON');
   }
 
+  const authoring = createAuthoringStore(db);
   const insertRun = db.prepare('INSERT INTO runs (id, owner, task_id, snapshot) VALUES (?, ?, ?, ?)');
   const runById = db.prepare('SELECT snapshot FROM runs WHERE id = ? AND owner = ? AND task_id = ?');
+  const writeRunCoaching = db.prepare(`
+    INSERT INTO run_coaching (run_id, note) SELECT id, ? FROM runs WHERE id = ? AND owner = ?
+    ON CONFLICT(run_id) DO UPDATE SET note = CASE
+      WHEN json_type(run_coaching.note, '$.initial') = 'object'
+        THEN json_set(excluded.note, '$.initial', json_extract(run_coaching.note, '$.initial'))
+      WHEN json_extract(run_coaching.note, '$.conclusion') <> ''
+        AND json_extract(run_coaching.note, '$.conclusion') <> json_extract(excluded.note, '$.conclusion')
+        THEN json_set(excluded.note, '$.initial', json(run_coaching.note))
+      ELSE excluded.note
+    END
+  `);
   const insertRecord = db.prepare(`
-    INSERT INTO records (id, run_id, published_at, conclusion, tracker_status)
-    SELECT ?, id, ?, ?, ? FROM runs WHERE id = ? AND owner = ? AND task_id = ?
+    INSERT INTO records (id, run_id, published_at, conclusion, tracker_status, coaching)
+    SELECT ?, id, ?, ?, ?, (SELECT note FROM run_coaching WHERE run_id = runs.id)
+    FROM runs WHERE id = ? AND owner = ? AND task_id = ?
     ON CONFLICT(run_id) WHERE canonical = 1 DO NOTHING
   `);
   const recordQuery = `
-    SELECT records.id, published_at, snapshot, conclusion, decision, comment, reviewed_at, previous_id, tracker_status, tracker_id
+    SELECT records.id, published_at, snapshot, conclusion, decision, comment, reviewed_at, previous_id, tracker_status, tracker_id, coaching
     FROM records JOIN runs ON runs.id = run_id LEFT JOIN reviews ON record_id = records.id
   `;
   const byRun = db.prepare(`${recordQuery} WHERE run_id = ? AND owner = ? AND task_id = ? AND canonical = 1`);
   const byId = db.prepare(`${recordQuery} WHERE records.id = ? AND owner = ?`);
   const nextVersion = db.prepare(`${recordQuery} WHERE previous_id = ? AND owner = ?`);
   const insertRevision = db.prepare(`
-    INSERT INTO records (id, run_id, published_at, conclusion, previous_id, canonical, tracker_status)
-    SELECT ?, id, ?, ?, ?, ?, ? FROM runs WHERE id = ? AND owner = ? AND task_id = ?
+    INSERT INTO records (id, run_id, published_at, conclusion, previous_id, canonical, tracker_status, coaching)
+    SELECT ?, id, ?, ?, ?, ?, ?, (SELECT note FROM run_coaching WHERE run_id = runs.id)
+    FROM runs WHERE id = ? AND owner = ? AND task_id = ?
     ON CONFLICT DO NOTHING
   `);
   const completeDelivery = db.prepare(`
     UPDATE records SET tracker_status = ?, tracker_id = ? WHERE id = ? AND tracker_status = 'pending'
   `);
+  const recordAccess = `owner = ? OR EXISTS (
+    SELECT 1 FROM assignments a JOIN authored_versions v ON a.task_id = v.task_id
+    JOIN authored_projects p ON p.id = v.project_id AND p.mentor = a.mentor
+    WHERE a.mentor = ? AND a.trainee = runs.owner AND a.task_id = runs.task_id
+  )`;
+  const allowedRecordOwner = db.prepare(`
+    SELECT owner FROM records JOIN runs ON runs.id = run_id WHERE records.id = ? AND (${recordAccess})
+  `);
   const byOwner = db.prepare(`
-    SELECT records.id, task_id, published_at, decision, previous_id, tracker_status,
+    SELECT records.id, task_id, owner, published_at, decision, previous_id, tracker_status,
       json_extract(snapshot, '$.task.title') AS title,
       (SELECT next.id FROM records AS next WHERE next.previous_id = records.id) AS next_id
     FROM records
     JOIN runs ON runs.id = run_id LEFT JOIN reviews ON record_id = records.id
-    WHERE owner = ? ORDER BY published_at DESC, records.id LIMIT 50
+    WHERE ${recordAccess} ORDER BY published_at DESC, records.id LIMIT 50
   `);
   const writeReview = db.prepare(`
     INSERT INTO reviews (record_id, decision, comment, reviewed_at)
@@ -138,11 +168,13 @@ export function createStore(path: string) {
   const openAttempt = db.prepare('INSERT INTO attempts (id, task_id, trainee) VALUES (?, ?, ?)');
   const attemptScope = 'id = ? AND task_id = ? AND trainee = ?';
   const attemptById = db.prepare(`SELECT first, help, state FROM attempts WHERE ${attemptScope}`);
+  const writeAttemptCoaching = db.prepare(`UPDATE attempts SET coaching = ?, help = CASE WHEN help = 'none' THEN 'after-choice' ELSE help END
+    WHERE ${attemptScope} AND state = 'open' AND first IS NOT NULL`);
   const writeFirst = db.prepare(`UPDATE attempts SET first = ? WHERE ${attemptScope} AND state = 'open' AND first IS NULL`);
   const markHelp = db.prepare(`UPDATE attempts SET help = CASE WHEN first IS NULL THEN 'before-choice' ELSE 'after-choice' END
     WHERE ${attemptScope} AND state = 'open' AND help = 'none'`);
   const lockAttempt = db.prepare(`UPDATE attempts SET state = 'running' WHERE ${attemptScope} AND state = 'open'
-    RETURNING first, help`);
+    RETURNING first, help, coaching`);
   const releaseAttempt = db.prepare(`UPDATE attempts SET state = 'open' WHERE ${attemptScope} AND state = 'running'`);
   const finishAttempt = db.prepare(`UPDATE attempts SET state = 'used' WHERE ${attemptScope} AND state = 'running'`);
 
@@ -151,6 +183,7 @@ export function createStore(path: string) {
     const record: Publication = { id: String(row.id), url: `/records/${row.id}`, publishedAt: String(row.published_at),
       run: JSON.parse(String(row.snapshot)) as Run };
     if (row.conclusion) record.conclusion = String(row.conclusion);
+    if (typeof row.coaching === 'string') record.coaching = JSON.parse(row.coaching) as CoachedConclusion;
     if (row.tracker_status === 'pending' || row.tracker_status === 'blocked') record.tracker = { status: row.tracker_status };
     if (row.tracker_status === 'delivered' && typeof row.tracker_id === 'string') {
       record.tracker = { status: 'delivered', id: row.tracker_id };
@@ -173,7 +206,7 @@ export function createStore(path: string) {
   }
 
   return {
-    authoring: createAuthoringStore(db),
+    authoring,
     assignments(trainee: DemoIdentityId) {
       return assignedTo.all(trainee).map((row) => JSON.parse(String(row.snapshot)) as Task);
     },
@@ -199,10 +232,18 @@ export function createStore(path: string) {
       markHelp.run(id, taskId, trainee);
       return attemptById.get(id, taskId, trainee)?.state === 'open';
     },
+    attemptChoice(id: string, taskId: string, trainee: DemoIdentityId): AttemptChoice | undefined {
+      const row = attemptById.get(id, taskId, trainee);
+      return row?.state === 'open' && typeof row.first === 'string' ? JSON.parse(row.first) : undefined;
+    },
+    saveAttemptCoaching(id: string, taskId: string, trainee: DemoIdentityId, note: CoachingReply) {
+      return writeAttemptCoaching.run(JSON.stringify(note), id, taskId, trainee).changes === 1;
+    },
     lockAttempt(id: string, taskId: string, trainee: DemoIdentityId) {
       const row = lockAttempt.get(id, taskId, trainee);
       return row ? { first: row.first ? JSON.parse(String(row.first)) as AttemptChoice : undefined,
-        help: row.help as NonNullable<Run['attempt']>['help'] } : undefined;
+        help: row.help as NonNullable<Run['attempt']>['help'],
+        coaching: typeof row.coaching === 'string' ? JSON.parse(row.coaching) as CoachingReply : undefined } : undefined;
     },
     releaseAttempt(id: string, taskId: string, trainee: DemoIdentityId) {
       releaseAttempt.run(id, taskId, trainee);
@@ -225,6 +266,9 @@ export function createStore(path: string) {
       const row = runById.get(id, owner, taskId);
       return row ? JSON.parse(String(row.snapshot)) as Run : undefined;
     },
+    saveRunCoaching(id: string, owner: string, analyzed: CoachedConclusion) {
+      writeRunCoaching.run(JSON.stringify(analyzed), id, owner);
+    },
     publish(runId: string, owner: string, taskId: string, conclusion = '', track = false) {
       const id = `QA-${randomUUID()}`;
       const { changes } = insertRecord.run(id, new Date().toISOString(), conclusion, track ? 'pending' : null, runId, owner, taskId);
@@ -233,6 +277,9 @@ export function createStore(path: string) {
       return { record, created: changes === 1 };
     },
     readRecord,
+    recordOwner(id: string, owner: DemoIdentityId, mentor?: DemoIdentityId) {
+      return allowedRecordOwner.get(id, owner, mentor ?? null)?.owner as DemoIdentityId | undefined;
+    },
     revise(previous: Publication, owner: string, runId: string, conclusion: string, track = false) {
       const id = `QA-${randomUUID()}`;
       const { changes } = insertRevision.run(id, new Date().toISOString(), conclusion, previous.id,
@@ -259,9 +306,9 @@ export function createStore(path: string) {
         throw error;
       }
     },
-    recordsFor(owner: string) {
-      return byOwner.all(owner).map((row) => ({
-        id: row.id, taskId: row.task_id, publishedAt: row.published_at, decision: row.decision,
+    recordsFor(owner: DemoIdentityId, mentor?: DemoIdentityId) {
+      return byOwner.all(owner, mentor ?? null).map((row) => ({
+        id: row.id, taskId: row.task_id, owner: row.owner, publishedAt: row.published_at, decision: row.decision,
         previousId: row.previous_id || undefined, nextId: row.next_id || undefined,
         trackerStatus: row.tracker_status || undefined, title: row.title || undefined,
       }));

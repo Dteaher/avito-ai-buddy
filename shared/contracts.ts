@@ -58,11 +58,29 @@ export interface TaskDraft {
   revision: string;
 }
 
+export const taskClarificationSections = {
+  description: 'Формулировка задачи', criterion: 'Критерий успеха', checks: 'Выбор запроса',
+} as const;
+
+export interface TaskClarification {
+  section: keyof typeof taskClarificationSections;
+  text: string;
+}
+
+export type TaskTextSection = Exclude<TaskClarification['section'], 'checks'>;
+
 export interface TaskVersion {
   version: number;
   task: Task;
   input: TaskDraftInput;
-  assigned: boolean;
+  participants: TaskParticipant[];
+}
+
+export interface TaskParticipant {
+  traineeId: DemoIdentityId;
+  started: boolean;
+  clarification: TaskClarification | null;
+  firstChoice?: AttemptChoice;
 }
 
 export interface TaskProject {
@@ -75,6 +93,7 @@ export interface TaskEditorData {
   catalog: CatalogCheck[];
   projects: TaskProject[];
   trainees: DemoIdentity[];
+  canSuggest: boolean;
 }
 
 export interface PriceCheck extends RequestDefinition {
@@ -89,6 +108,7 @@ interface WorkspaceBase {
   identity?: DemoIdentity;
   standFixed?: boolean;
   attemptId?: string;
+  clarification?: TaskClarification | null;
   assignmentOffers?: AssignmentOffer[];
 }
 
@@ -162,7 +182,7 @@ interface RunBase {
   task: Task;
   checkedAt: string;
   preparation?: Preparation;
-  attempt?: { first?: AttemptChoice; final: AttemptChoice; help: 'none' | 'before-choice' | 'after-choice' };
+  attempt?: { first?: AttemptChoice; final: AttemptChoice; help: 'none' | 'before-choice' | 'after-choice'; coaching?: CoachingReply };
 }
 
 export interface AttemptChoice {
@@ -187,7 +207,9 @@ export interface Publication {
   id: string;
   url: string;
   publishedAt: string;
+  traineeName?: string;
   run: Run;
+  coaching?: CoachedConclusion;
   conclusion?: string;
   tracker?: TrackerDelivery;
   review?: { decision: 'accepted' | 'returned'; comment: string; reviewedAt: string };
@@ -201,6 +223,7 @@ export interface RecordListItem {
   id: string;
   taskId: string;
   publishedAt: string;
+  traineeName?: string;
   decision: 'accepted' | 'returned' | null;
   trackerStatus?: TrackerDelivery['status'];
   title?: string;
@@ -232,6 +255,23 @@ export interface RunEvidenceSource {
 }
 
 export type BuddySource = { instructionId: string; ruleNumber: number } | RunEvidenceSource;
+
+export interface CoachingReply {
+  topic: 'query' | 'expectation' | 'interpretation' | 'evidence' | 'ready';
+  mode: BuddyAnswer['mode'];
+  question: string;
+  explanation: string;
+  fact: string;
+  sources: BuddySource[];
+  draft?: CheckDraft;
+  fallbackReason?: BuddyAnswer['fallbackReason'];
+}
+
+export interface CoachedConclusion {
+  conclusion: string;
+  note: CoachingReply;
+  initial?: { conclusion: string; note: CoachingReply };
+}
 
 export interface BuddyAnswer {
   kind: 'guidance' | 'clarification' | 'insufficient' | 'action' | 'draft' | 'feedback';

@@ -8,6 +8,8 @@ import { Evidence, RunContext } from './Evidence';
 import { PriceOrderInput } from './PriceOrder';
 import { Conclusion } from './Conclusion';
 import { AttemptTrail } from './AttemptTrail';
+import { TaskClarificationForm } from './TaskClarificationForm';
+import { CoachingCard } from './CoachingCard';
 
 const stages = ['Правило', 'Ожидание', 'Проверить', 'Передать'];
 type Choices = Partial<Record<CheckId, City[]>>;
@@ -283,6 +285,8 @@ export function Workspace({ data, mode, chooseMode, revision }: {
                   </fieldset>
                 );
               })}
+              {data.attemptId && firstChoice && !run && mode !== 'manual' && <CoachingCard key={mode ?? 'default'} taskId={task.id}
+                context={{ attemptId: data.attemptId }} mode={mode} disabled={busy || savingChoice} openRule={openSource} onDraft={applyDraft} />}
               {failure && <p className="action-error" role="alert"><CircleAlert size={19} />{failure}</p>}
               <div className="actions">
                 {data.attemptId && !firstChoice && <button type="button" className={task.authoringId ? 'button primary' : 'button secondary'} disabled={!actionReady || savingChoice || busy}
@@ -302,7 +306,8 @@ export function Workspace({ data, mode, chooseMode, revision }: {
               </div>
               <Evidence key={run.id} run={run} animate={animateResult} anchorPrefix="result-evidence" />
               <AttemptTrail run={run} openRule={openSource} />
-              {stage === 2 && !publication && <Conclusion key={`${run.id}/${mode}`} run={run} value={conclusion} onChange={setConclusion} openRule={openSource} mode={mode} />}
+              {stage === 2 && !publication && <Conclusion key={`${run.id}/${mode}`} run={run} value={conclusion} onChange={setConclusion} openRule={openSource} mode={mode}
+                coaching={mode !== 'manual' && <CoachingCard taskId={task.id} context={{ runId: run.id, conclusion }} mode={mode} openRule={openSource} />} />}
               {stage === 3 && (publication?.conclusion || conclusion.trim()) && <p className="record-conclusion"><strong>Твой вывод</strong>{publication?.conclusion ?? conclusion}</p>}
               {stage === 3 && <details className="response-details">
                 <summary>Данные записи для трекера{!task.authoringId && ` · ${task.id}`} <ChevronDown size={17} className="disclosure" /></summary>
@@ -344,6 +349,7 @@ export function Workspace({ data, mode, chooseMode, revision }: {
               </p>}
             </>
           )}
+          {task.authoringId && <TaskClarificationForm taskId={task.id} version={task.instruction.version} initial={data.clarification} hidden={stage > 1} />}
         </section>
       </div>
       <InstructionDialog instruction={task.instruction} dialog={dialog} />

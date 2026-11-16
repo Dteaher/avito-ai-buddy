@@ -1,16 +1,17 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { ArrowUpRight, LoaderCircle } from 'lucide-react';
 import type { BuddyAnswer, BuddyQuestion, Run } from '../shared/contracts';
 import { errorMessage, post } from './api';
 import { Escalation } from './Escalation';
-import { formatTime } from './Evidence';
+import { formatTime, openResponse } from './Evidence';
 
-export function Conclusion({ run, value, onChange, openRule, mode, evidenceAnchor = 'result-evidence', label = 'Твой вывод', context }: {
+export function Conclusion({ run, value, onChange, openRule, mode, evidenceAnchor = 'result-evidence', label = 'Твой вывод', context, coaching }: {
   run: Run; value: string; onChange: (value: string) => void;
   mode?: BuddyQuestion['mode']; openRule: (rule: number) => void;
   evidenceAnchor?: string;
   label?: string;
   context?: string;
+  coaching?: ReactNode;
 }) {
   const field = useId();
   const [feedback, setFeedback] = useState<{ question: string; mode?: BuddyQuestion['mode']; answer: BuddyAnswer }>();
@@ -64,20 +65,15 @@ export function Conclusion({ run, value, onChange, openRule, mode, evidenceAncho
         {answer.facts?.map((fact) => <p key={fact} className="fact">{fact}</p>)}
         <div className="source-links">
           {answer.sources.filter((source) => !('runId' in source) || source.runId === run.id).map((source) => 'runId' in source
-            ? <a key={source.checkId} className="text-link" href={`#${evidenceAnchor}-${source.checkId}`} onClick={() => {
-              const target = document.getElementById(`${evidenceAnchor}-${source.checkId}`);
-              let disclosure = target?.closest('details');
-              while (disclosure) {
-                disclosure.open = true;
-                disclosure = disclosure.parentElement?.closest('details') ?? null;
-              }
-            }}>Ответ стенда · {source.label} <ArrowUpRight size={15} /></a>
+            ? <a key={source.checkId} className="text-link" href={`#${evidenceAnchor}-${source.checkId}`}
+              onClick={() => openResponse(`${evidenceAnchor}-${source.checkId}`)}>Ответ стенда · {source.label} <ArrowUpRight size={15} /></a>
             : <button key={source.ruleNumber} type="button" className="source-link" onClick={() => openRule(source.ruleNumber)}>
               Тестовая инструкция · пункт {source.ruleNumber} <ArrowUpRight size={15} />
             </button>)}
         </div>
         {answer.escalation && <Escalation text={answer.escalation} />}
       </div>}
+      {coaching}
     </section>
   );
 }

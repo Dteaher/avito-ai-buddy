@@ -9,6 +9,17 @@ export function formatTime(time: string) {
   return new Intl.DateTimeFormat('ru-RU', { dateStyle: 'short', timeStyle: 'short' }).format(new Date(time));
 }
 
+export function openResponse(anchor: string) {
+  const target = document.getElementById(anchor);
+  let detail = target?.closest('details');
+  while (detail) {
+    detail.open = true;
+    detail = detail.parentElement?.closest('details') ?? null;
+  }
+  target?.querySelectorAll('details').forEach((item) => { item.open = true; });
+  return target;
+}
+
 function RequestLine({ check }: { check: ResponseCheck }) {
   return <span className="endpoint"><span>GET</span><code>{check.path}</code></span>;
 }

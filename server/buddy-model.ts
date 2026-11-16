@@ -165,35 +165,47 @@ export async function generateReply(provider: NonNullable<ReturnType<typeof read
   if (followUp) context.push(followUp);
   if (plan) context.push(`Подход к ответу (${plan.kind}). ${plan.hint}${plan.sourceIds?.length ? ` Опирайся на ${plan.sourceIds.join(', ')}.` : ''}`);
 
+  const soleDraft = workflow?.draftRequired && workflow.checks.length === 1 ? workflow.checks[0] : undefined;
+  const draftFields: Record<string, object> = {};
+  if (workflow?.intent === 'plan') {
+    draftFields.checkId = { type: 'string', enum: soleDraft ? [soleDraft.id] : ['', ...(workflow.clarificationRequired ? [] : workflow.checks.map(({ id }) => id))] };
+    draftFields.expected = { type: 'array', ...(soleDraft ? { minItems: soleDraft.expected.length, maxItems: soleDraft.expected.length }
+      : { maxItems: workflow.clarificationRequired ? 0 : 3 }),
+      items: { type: 'string', enum: [...new Set(workflow.checks.flatMap(({ expected }) => expected))] } };
+  } else if (workflow?.intent === 'review') {
+    draftFields.claims = { type: 'array', items: { type: 'string', enum: workflow.claims } };
+  }
+  const content = await requestModelContent(provider, {
+    name: 'buddy_reply', maxTokens: workflow ? 240 : 480,
+    messages: [{ role: 'system', content: context.join('\n') }, ...history, { role: 'user', content: question }],
+    properties: {
+      text: { type: 'string' }, kind: { type: 'string', enum: replyKinds(plan, workflow) },
+      sources: { type: 'array', ...(workflow?.clarificationRequired ? { maxItems: 0 } : {}),
+        items: { type: 'string', enum: [...evidence.keys()] } },
+      ...draftFields,
+    },
+    signal: options.signal,
+  });
+  return decode(content, evidence, plan, workflow);
+}
+
+export async function requestModelContent(provider: NonNullable<ReturnType<typeof readProvider>>, options: {
+  name: string; maxTokens: number; messages: ({ role: 'system'; content: string } | DialogueMessage)[];
+  properties: Record<string, object>; signal?: AbortSignal;
+}) {
   const timeout = AbortSignal.timeout(provider.timeout);
   const signal = options.signal ? AbortSignal.any([timeout, options.signal]) : timeout;
-  const soleDraft = workflow?.draftRequired && workflow.checks.length === 1 ? workflow.checks[0] : undefined;
-  const draftFields = workflow?.intent === 'plan' ? {
-    checkId: { type: 'string', enum: soleDraft ? [soleDraft.id] : ['', ...(workflow.clarificationRequired ? [] : workflow.checks.map(({ id }) => id))] },
-    expected: { type: 'array', ...(soleDraft ? { minItems: soleDraft.expected.length, maxItems: soleDraft.expected.length }
-      : { maxItems: workflow.clarificationRequired ? 0 : 3 }),
-      items: { type: 'string', enum: [...new Set(workflow.checks.flatMap(({ expected }) => expected))] } },
-  } : workflow?.intent === 'review' ? {
-    claims: { type: 'array', items: { type: 'string', enum: workflow.claims } },
-  } : {};
   const response = await fetch(provider.endpoint, {
     method: 'POST', redirect: 'error', signal,
     headers: { 'content-type': 'application/json', ...(provider.key ? { authorization: `Bearer ${provider.key}` } : {}) },
     body: JSON.stringify({
-      model: provider.model, temperature: 0, max_tokens: workflow ? 240 : 480,
-      messages: [{ role: 'system', content: context.join('\n') }, ...history, { role: 'user', content: question }],
+      model: provider.model, temperature: 0, max_tokens: options.maxTokens, messages: options.messages,
       response_format: {
         type: 'json_schema',
         json_schema: {
-          name: 'buddy_reply', strict: true,
+          name: options.name, strict: true,
           schema: {
-            type: 'object', additionalProperties: false, required: ['text', 'kind', 'sources', ...Object.keys(draftFields)],
-            properties: {
-              text: { type: 'string' }, kind: { type: 'string', enum: replyKinds(plan, workflow) },
-              sources: { type: 'array', ...(workflow?.clarificationRequired ? { maxItems: 0 } : {}),
-                items: { type: 'string', enum: [...evidence.keys()] } },
-              ...draftFields,
-            },
+            type: 'object', additionalProperties: false, required: Object.keys(options.properties), properties: options.properties,
           },
         },
       },
@@ -206,5 +218,5 @@ export async function generateReply(provider: NonNullable<ReturnType<typeof read
   const data = await readResponse(response);
   const first: unknown = isObject(data) && Array.isArray(data.choices) ? data.choices[0] : undefined;
   const message = isObject(first) ? first.message : undefined;
-  return decode(isObject(message) ? message.content : undefined, evidence, plan, workflow);
+  return isObject(message) ? message.content : undefined;
 }

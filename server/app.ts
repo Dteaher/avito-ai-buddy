@@ -1,12 +1,13 @@
 import { randomBytes } from 'node:crypto';
 import { resolve } from 'node:path';
 import express, { type ErrorRequestHandler, type Request, type RequestHandler } from 'express';
-import type { AttemptChoice, CheckInput, DemoIdentity, Preparation, Publication, Task, Workspace } from '../shared/contracts.ts';
-import { parseBuddyQuestion, type createBuddy } from './buddy.ts';
+import { taskClarificationSections, type AttemptChoice, type CheckInput, type DemoIdentity, type Preparation,
+  type Publication, type Task, type TaskClarification, type Workspace } from '../shared/contracts.ts';
+import { isBuddyGreeting, parseBuddyQuestion, type createBuddy } from './buddy.ts';
 import { executeRun, isObject, listings, parseChecks, setPlan, task } from './scenario.ts';
 import { executePriceRun, parsePriceCheck, priceCheck, priceItems, sortTask } from './price-scenario.ts';
 import type { createStore } from './store.ts';
-import { assignedTrainee, findIdentity, identities } from './demo-identities.ts';
+import { assignedTrainee, authoringTrainees, findIdentity, identities } from './demo-identities.ts';
 import { inventoryTasks, products } from './archive-scenario.ts';
 import type { SendToTracker } from './tracker.ts';
 import { registerAuthoring } from './task-editor.ts';
@@ -35,6 +36,8 @@ export function createApp({ store, standOrigin, buddy, tracker, staticDir }: App
   const inventoryHeaders = { 'X-Demo-Inventory-Key': randomBytes(24).toString('hex') };
   const taskFor = (id: unknown, owner: DemoIdentity['id']) => demoTasks.find((candidate) => candidate.id === id)
     ?? (typeof id === 'string' ? store.assignment(id, owner) : undefined);
+  const mentorId = (identity: DemoIdentity) => identity.role === 'mentor' ? identity.id : undefined;
+  const recordOwner = (id: string, identity: DemoIdentity) => store.recordOwner(id, assignedTrainee(identity.id), mentorId(identity));
   async function deliver(record: Publication, owner: DemoIdentity['id']) {
     if (!tracker || record.tracker?.status !== 'pending') return record;
     const { run, id, url, conclusion } = record;
@@ -145,6 +148,7 @@ export function createApp({ store, standOrigin, buddy, tracker, staticDir }: App
     const workspace: Workspace = selected === sortTask.id
       ? { ...context, kind: 'price-order', task: sortTask, checks: [priceCheck], orderItems: priceItems }
       : { ...context, task: current, checks: setPlan(current).checks.map(({ id, label, path, parameter, uniqueIds }) => ({ id, label, path, parameter, uniqueIds })),
+        clarification: current.authoringId ? store.authoring.clarification(current.id, identity.id) : undefined,
         attemptId: current.comparison ? store.openAttempt(current.id, identity.id) : undefined };
     res.json(workspace);
   });
@@ -170,7 +174,7 @@ export function createApp({ store, standOrigin, buddy, tracker, staticDir }: App
     next();
   });
 
-  registerAuthoring(app, store);
+  registerAuthoring(app, store, buddy);
 
   const assignedTask: RequestHandler = (req, res, next) => {
     const current = res.locals.identity.role === 'trainee' ? taskFor(req.params.taskId, res.locals.identity.id) : undefined;
@@ -188,21 +192,40 @@ export function createApp({ store, standOrigin, buddy, tracker, staticDir }: App
       res.status(403).json({ message: 'Поручение назначает наставник.' });
       return;
     }
-    const traineeId = assignedTrainee(mentor.id);
-    const { versionId, templateId } = req.body ?? {};
+    const { versionId, templateId, traineeId } = req.body ?? {};
     const template = typeof versionId === 'string' && templateId === undefined
       ? store.authoring.version(versionId, mentor.id)
       : versionId === undefined ? inventoryTasks.find(({ id }) => id === templateId) : undefined;
-    if (!template || req.body?.traineeId !== traineeId) {
+    const recipient = template?.authoringId ? authoringTrainees.find(({ id }) => id === traineeId)?.id
+      : traineeId === assignedTrainee(mentor.id) ? assignedTrainee(mentor.id) : undefined;
+    if (!template || !recipient) {
       res.status(400).json({ message: 'Выбери поручение и своего стажёра.' });
       return;
     }
-    const created = store.assign(template, traineeId, mentor.id);
-    res.status(created ? 201 : 200).json({ task: store.assignment(template.id, traineeId), traineeId });
+    const created = store.assign(template, recipient, mentor.id);
+    res.status(created ? 201 : 200).json({ task: store.assignment(template.id, recipient), traineeId: recipient });
   });
 
   app.get('/api/tasks/:taskId/instruction', assignedTask, (_req, res) => {
     res.json(res.locals.task.instruction);
+  });
+
+  app.post('/api/tasks/:taskId/clarification', assignedTask, (req, res) => {
+    const current: Task = res.locals.task;
+    if (!current.authoringId) {
+      res.status(404).json({ message: 'Уточнение доступно в поручении наставника.' });
+      return;
+    }
+    const body: unknown = req.body;
+    if (!isObject(body) || Object.keys(body).length !== 2 || typeof body.section !== 'string'
+      || !Object.hasOwn(taskClarificationSections, body.section) || typeof body.text !== 'string'
+      || !body.text.trim() || body.text.trim().length > 400) {
+      res.status(400).json({ message: 'Укажи, что непонятно, и напиши вопрос до 400 символов.' });
+      return;
+    }
+    const clarification: TaskClarification = { section: body.section as TaskClarification['section'], text: body.text.trim() };
+    store.authoring.saveClarification(current.id, res.locals.identity.id, clarification);
+    res.json(clarification);
   });
 
   app.post('/api/tasks/:taskId/attempt', assignedTask, (req, res) => {
@@ -234,6 +257,50 @@ export function createApp({ store, standOrigin, buddy, tracker, staticDir }: App
     res.json({ fixed: standFixed });
   });
 
+  app.post('/api/tasks/:taskId/coaching', assignedTask, async (req, res) => {
+    const task: Task = res.locals.task;
+    const owner: DemoIdentity['id'] = res.locals.identity.id;
+    const input: unknown = req.body;
+    if (!isObject(input)) {
+      res.status(400).json({ message: 'Выбери попытку или сохранённый прогон.' });
+      return;
+    }
+    const { attemptId, runId, conclusion = '', mode, ...rest } = input;
+    const before = typeof attemptId === 'string' && runId === undefined && input.conclusion === undefined;
+    const after = typeof runId === 'string' && attemptId === undefined && typeof conclusion === 'string' && conclusion.trim().length <= 1000;
+    if ((!before && !after) || (mode !== undefined && mode !== 'guide') || Object.keys(rest).length) {
+      res.status(400).json({ message: 'Передай сохранённую попытку или прогон и вывод до 1000 символов.' });
+      return;
+    }
+    const lifetime = new AbortController();
+    res.once('close', () => lifetime.abort());
+    if (before) {
+      const first = task.comparison && store.attemptChoice(attemptId, task.id, owner);
+      if (!first) {
+        res.status(409).json({ message: 'Сначала сохрани первый вариант проверки.' });
+        return;
+      }
+      const note = await buddy.coaching(task, { first }, mode === 'guide', lifetime.signal);
+      if (lifetime.signal.aborted) return;
+      if (!store.saveAttemptCoaching(attemptId, task.id, owner, note)) {
+        res.status(409).json({ message: 'Попытка уже запущена. Открой разбор рядом с результатом.' });
+        return;
+      }
+      res.json(note);
+      return;
+    }
+    const run = store.readRun(String(runId), owner, task.id);
+    if (!run) {
+      res.status(404).json({ message: 'Прогон недоступен в этой задаче.' });
+      return;
+    }
+    const text = String(conclusion).trim();
+    const note = await buddy.coaching(task, { run, conclusion: text }, mode === 'guide', lifetime.signal);
+    if (lifetime.signal.aborted) return;
+    store.saveRunCoaching(run.id, owner, { conclusion: text, note });
+    res.json(note);
+  });
+
   app.post('/api/tasks/:taskId/buddy', assignedTask, async (req, res) => {
     const input = parseBuddyQuestion(req.body);
     if (!input) {
@@ -247,7 +314,7 @@ export function createApp({ store, standOrigin, buddy, tracker, staticDir }: App
       res.status(404).json({ message: 'Прогон недоступен в этой задаче.' });
       return;
     }
-    if (current.comparison && !run && input.mode !== 'manual'
+    if (current.comparison && !run && input.mode !== 'manual' && !isBuddyGreeting(input)
       && (!input.attemptId || !store.noteHelp(input.attemptId, current.id, owner))) {
       res.status(409).json({ message: 'Открой поручение заново для новой попытки.' });
       return;
@@ -310,7 +377,7 @@ export function createApp({ store, standOrigin, buddy, tracker, staticDir }: App
     }
     if (hasPreparation) run.preparation = { question, checkId: checkId as Preparation['checkId'], source: 'buddy-draft' };
     if (locked && choice && typeof attemptId === 'string') {
-      run.attempt = { first: locked.first, final: choice, help: locked.help };
+      run.attempt = { first: locked.first, final: choice, help: locked.help, coaching: locked.coaching };
       try {
         store.saveAttemptRun(attemptId, run, owner);
       } catch (error) {
@@ -337,16 +404,22 @@ export function createApp({ store, standOrigin, buddy, tracker, staticDir }: App
   });
 
   app.get('/api/records', (_req, res) => {
-    res.json(store.recordsFor(assignedTrainee(res.locals.identity.id)));
+    const identity: DemoIdentity = res.locals.identity;
+    res.json(store.recordsFor(assignedTrainee(identity.id), mentorId(identity)).map(({ owner, ...record }) => ({
+      ...record, traineeName: identity.role === 'mentor' ? findIdentity(owner)?.name : undefined,
+    })));
   });
 
   app.get('/api/records/:id', (req, res) => {
-    const record = store.readRecord(req.params.id, assignedTrainee(res.locals.identity.id));
-    if (!record || !taskFor(record.run.task.id, assignedTrainee(res.locals.identity.id))) {
+    const identity: DemoIdentity = res.locals.identity;
+    const owner = recordOwner(req.params.id, identity);
+    const record = owner && store.readRecord(req.params.id, owner);
+    if (!owner || !record || !taskFor(record.run.task.id, owner)) {
       res.status(404).json({ message: 'Запись не найдена. Проверь ссылку или открой рабочее пространство.' });
       return;
     }
-    res.json({ ...record, ...store.readReplay(record.id, assignedTrainee(res.locals.identity.id)) });
+    res.json({ ...record, ...store.readReplay(record.id, owner),
+      traineeName: identity.role === 'mentor' ? findIdentity(owner)?.name : undefined });
   });
 
   app.post('/api/records/:id/tracker', async (req, res) => {
@@ -390,9 +463,9 @@ export function createApp({ store, standOrigin, buddy, tracker, staticDir }: App
 
   app.post('/api/records/:id/replay', async (req, res) => {
     const identity: DemoIdentity = res.locals.identity;
-    const owner = assignedTrainee(identity.id);
-    const record = store.readRecord(req.params.id, owner);
-    if (!record) {
+    const owner = recordOwner(req.params.id, identity);
+    const record = owner && store.readRecord(req.params.id, owner);
+    if (!owner || !record) {
       res.status(404).json({ message: 'Запись недоступна для повторной проверки.' });
       return;
     }
@@ -432,16 +505,17 @@ export function createApp({ store, standOrigin, buddy, tracker, staticDir }: App
       res.status(400).json({ message: 'Для возврата оставь комментарий до 1000 символов.' });
       return;
     }
-    const { record, created } = store.reviewRecord(req.params.id, assignedTrainee(identity.id), decision, comment.trim());
-    if (!record) {
+    const owner = recordOwner(req.params.id, identity);
+    const review = owner && store.reviewRecord(req.params.id, owner, decision, comment.trim());
+    if (!review || !review.record) {
       res.status(404).json({ message: 'Запись недоступна.' });
       return;
     }
-    if (!created) {
+    if (!review.created) {
       res.status(409).json({ message: 'Решение уже сохранено. Обнови запись.' });
       return;
     }
-    res.json(record);
+    res.json(review.record);
   });
 
   app.use(['/api', '/demo'], (_req, res) => res.status(404).json({ message: 'Маршрут не найден.' }));
